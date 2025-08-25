@@ -1,134 +1,68 @@
-# Pre-authenticated Chrome Session Export
-param(
-    [string]$WebUrl = "https://sp.safalo.com/hr",
-    [string]$ListName = "OnboardingList", 
-    [string]$OutputPath = "C:\Exports\NintexForms",
-    [int]$StartID = 1,
-    [int]$EndID = 10
-)
+# Ultra Simple Nintex Export - No Parameters to Avoid Syntax Issues
+Write-Host "Ultra Simple Nintex Export" -ForegroundColor Green
 
-Write-Host "Pre-authenticated Chrome Export" -ForegroundColor Green
-Write-Host "Web: $WebUrl"
-Write-Host "List: $ListName"
-Write-Host "IDs: $StartID to $EndID"
-Write-Host ""
+# Fixed settings - edit these directly in the script
+$webUrl = "https://sp.safalo.com/hr"
+$listName = "OnboardingList"
+$outputPath = "C:\Exports\NintexForms"
+$startID = 1
+$endID = 10
+
+Write-Host "Web: $webUrl"
+Write-Host "List: $listName"
+Write-Host "Output: $outputPath"
+Write-Host "IDs: $startID to $endID"
 
 # Create output folder
-if (!(Test-Path $OutputPath)) {
-    New-Item -ItemType Directory -Path $OutputPath -Force
-    Write-Host "Created folder: $OutputPath"
+if (!(Test-Path $outputPath)) {
+    New-Item -ItemType Directory -Path $outputPath -Force
 }
 
 # Find Chrome
-$chrome = ""
-if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
-    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-}
-elseif (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
+$chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+if (!(Test-Path $chrome)) {
     $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 }
-else {
-    Write-Host "Chrome not found!" -ForegroundColor Red
+
+if (!(Test-Path $chrome)) {
+    Write-Host "Chrome not found" -ForegroundColor Red
     exit
 }
 
-Write-Host "Using Chrome: $chrome"
+Write-Host "Chrome: $chrome"
 Write-Host ""
-
-# Instructions for manual authentication
-Write-Host "SETUP REQUIRED:" -ForegroundColor Yellow
-Write-Host "1. Open Chrome manually" -ForegroundColor White
-Write-Host "2. Navigate to: $WebUrl" -ForegroundColor White
-Write-Host "3. Login with your SharePoint credentials" -ForegroundColor White
-Write-Host "4. Verify you can access the site" -ForegroundColor White
-Write-Host "5. Keep Chrome open during this export" -ForegroundColor White
-Write-Host ""
-
-$continue = Read-Host "Have you logged into SharePoint in Chrome? (y/n)"
-if ($continue -ne "y" -and $continue -ne "Y") {
-    Write-Host "Please complete the login steps above, then run the script again." -ForegroundColor Yellow
-    exit
-}
-
-Write-Host ""
-Write-Host "Starting export using your authenticated Chrome session..." -ForegroundColor Green
+Write-Host "Make sure you're logged into SharePoint in Chrome first!" -ForegroundColor Yellow
 Write-Host ""
 
 $success = 0
-$failed = 0
 
-for ($id = $StartID; $id -le $EndID; $id++) {
-    $url = "$WebUrl/Lists/$ListName/DispForm.aspx?ID=$id"
-    $pdfFile = "$OutputPath\NintexForm_ID$id.pdf"
+for ($id = $startID; $id -le $endID; $id++) {
+    $url = "$webUrl/Lists/$listName/DispForm.aspx?ID=$id"
+    $pdfFile = "$outputPath\Form_ID$id.pdf"
     
-    Write-Host "Processing ID $id..." -ForegroundColor White
-    Write-Host "  URL: $url" -ForegroundColor Gray
+    Write-Host "Processing ID $id"
+    Write-Host "  $url"
     
-    # Use Chrome with existing session (no user-data-dir specified = uses default profile)
-    $args = @(
-        "--headless"
-        "--disable-gpu" 
-        "--no-sandbox"
-        "--disable-dev-shm-usage"
-        "--virtual-time-budget=8000"
-        "--run-all-compositor-stages-before-draw"
-        "--print-to-pdf=$pdfFile"
-        "$url"
-    )
+    # Simple Chrome command
+    $arguments = "--headless --disable-gpu --no-sandbox --print-to-pdf=`"$pdfFile`" `"$url`""
     
-    try {
-        # Run Chrome using default profile (where user is already authenticated)
-        Start-Process -FilePath $chrome -ArgumentList $args -Wait -NoNewWindow
-        
-        # Give Chrome time to complete
-        Start-Sleep -Seconds 2
-        
-        if (Test-Path $pdfFile) {
-            $size = (Get-Item $pdfFile).Length
-            if ($size -gt 2000) {
-                Write-Host "  SUCCESS - PDF created ($size bytes)" -ForegroundColor Green
-                $success++
-            }
-            else {
-                Write-Host "  FAILED - PDF too small ($size bytes), likely error/login page" -ForegroundColor Red
-                # Keep the small file for debugging
-                Rename-Item $pdfFile "$pdfFile.error" -ErrorAction SilentlyContinue
-                $failed++
-            }
+    Start-Process -FilePath $chrome -ArgumentList $arguments -Wait -NoNewWindow
+    
+    Start-Sleep -Seconds 2
+    
+    if (Test-Path $pdfFile) {
+        $size = (Get-Item $pdfFile).Length
+        if ($size -gt 1000) {
+            Write-Host "  SUCCESS ($size bytes)" -ForegroundColor Green
+            $success++
+        } else {
+            Write-Host "  FAILED (too small)" -ForegroundColor Red
         }
-        else {
-            Write-Host "  FAILED - No PDF file created" -ForegroundColor Red
-            $failed++
-        }
+    } else {
+        Write-Host "  FAILED (no file)" -ForegroundColor Red
     }
-    catch {
-        Write-Host "  ERROR - $($_.Exception.Message)" -ForegroundColor Red
-        $failed++
-    }
-    
-    # Small delay between requests
-    Start-Sleep -Seconds 1
 }
 
 Write-Host ""
-Write-Host "=== EXPORT SUMMARY ===" -ForegroundColor Cyan
-Write-Host "Total processed: $($success + $failed)" -ForegroundColor White
-Write-Host "Successful exports: $success" -ForegroundColor Green
-Write-Host "Failed exports: $failed" -ForegroundColor Red
-
-if ($success -gt 0) {
-    Write-Host "Success rate: $([Math]::Round(($success / ($success + $failed)) * 100, 1))%" -ForegroundColor White
-}
-
-Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
-
-if ($failed -gt 0) {
-    Write-Host ""
-    Write-Host "If some exports failed:" -ForegroundColor Yellow
-    Write-Host "- Check if those IDs actually exist in SharePoint"
-    Write-Host "- Small .error files may contain login pages or error messages"
-    Write-Host "- Try refreshing your Chrome login and running again"
-}
-
-Write-Host ""
-Write-Host "Export completed!" -ForegroundColor Green
+Write-Host "Completed: $success successful exports" -ForegroundColor Green
+Write-Host "Files in: $outputPath"
