@@ -9,3 +9,6 @@ Install-Module -Name SharePointPnPPowerShellOnline -Force
 
 
 .\SimpleNintexExport.ps1 -WebUrl "https://sp.safalo.com/ConnorsWorkshop" -ListName "OnboardingList" -OutputPath "C:\Exports\NintexForms" -StartID 1 -EndID 10
+
+
+.\ExportForms.ps1 -WebUrl "https://sp.safalo.com/ConnorsWorkshop" -ListName "OnboardingList" -StartID 1 -EndID 20 -OutputPath "C:\Exports\NintexForms"
