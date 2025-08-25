@@ -1,6 +1,6 @@
 # Nintex Export with Authentication
 param(
-    [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
+    [string]$WebUrl = "https://sp.safalo.com/hr",
     [string]$ListName = "OnboardingList",
     [string]$OutputPath = "C:\Exports\NintexForms",
     [int]$StartID = 1,
@@ -149,7 +149,7 @@ $success = 0
 $failed = 0
 
 for ($id = $StartID; $id -le $EndID; $id++) {
-    $url = "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID=$id"
+    $url = "$WebUrl/Lists/$ListName/DispForm.aspx?ID=$id"
     $pdfFile = "$OutputPath\Form_ID$id.pdf"
     
     Write-Host ""
