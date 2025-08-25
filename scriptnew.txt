@@ -1,119 +1,382 @@
-# Selenium WebDriver + Chrome/Edge drivers
-Install-Package Selenium.WebDriver -ProviderName NuGet -Scope CurrentUser
-Install-Package Selenium.WebDriver.ChromeDriver -ProviderName NuGet -Scope CurrentUser     # (if using Chrome)
-Install-Package Selenium.WebDriver.MSEdgeDriver -ProviderName NuGet -Scope CurrentUser     # (if using Edge)
+# Nintex Forms PDF Export - SharePoint Server (Classic PowerShell)
+# Run this script directly on the SharePoint Server
 
-# PnP.PowerShell to enumerate list items
-Install-Module PnP.PowerShell -Scope CurrentUser
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$WebUrl,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$ListName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$OutputPath,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$Method = "Chrome", # Options: "Chrome", "wkhtmltopdf"
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ChromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$wkhtmltopdfPath = "C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe",
+    
+    [Parameter(Mandatory=$false)]
+    [int]$BatchSize = 50  # Process items in batches to avoid memory issues
+)
 
-
-
-# ===================== USER SETTINGS =====================
-$SiteUrl        = "https://<tenant>.sharepoint.com/sites/<site>"
-$ListName       = "OnboardingList"                          # Display name of the list
-$OutputFolder   = "C:\FormPDFs\OnboardingList"              # Where PDFs will be saved
-$UseEdge        = $true                                     # $true = Edge, $false = Chrome
-$BrowserProfile = "C:\SPOProfile"                           # Reused to keep SPO login cookies
-$Headless       = $true                                     # Set $false for the very first run to sign in
-$PageLoadWaitMs = 6000                                      # Adjust if your form has heavy rules/JS
-# Optional: name your PDFs with list fields
-$PdfNameFields  = @("Title")                                # Add more (e.g., "Created") if you want
-# =========================================================
-
-Import-Module PnP.PowerShell
-
-# Ensure output folder exists
-New-Item -ItemType Directory -Force -Path $OutputFolder | Out-Null
-
-# 1) Get items + the Display Form URL pattern
-Connect-PnPOnline -Url $SiteUrl -Interactive
-$web  = Get-PnPWeb
-$list = Get-PnPList -Identity $ListName
-
-# $list.DefaultDisplayFormUrl is server-relative (e.g., /sites/site/Lists/OnboardingList/DispForm.aspx)
-$dispRel = $list.DefaultDisplayFormUrl
-$siteBase = $web.Url.TrimEnd('/')
-
-# 2) Setup Selenium (Edge/Chrome) with CDP (DevTools) enabled
-Add-Type -AssemblyName "System.Drawing" | Out-Null
-
-if ($UseEdge) {
-    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver.MSEdgeDriver -ProviderName NuGet).Source -Parent) "lib\net48\msedgedriver.exe") -ErrorAction SilentlyContinue | Out-Null
-    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver -ProviderName NuGet).Source -Parent) "lib\net48\WebDriver.dll") | Out-Null
-    $edgeOpts = New-Object OpenQA.Selenium.Edge.EdgeOptions
-    $edgeOpts.AddArgument("--user-data-dir=$BrowserProfile")
-    if ($Headless) { $edgeOpts.AddArgument("--headless=new"); $edgeOpts.AddArgument("--disable-gpu") }
-    $edgeOpts.AddAdditionalOption("ms:edgeOptions", @{args=@()}) | Out-Null
-    $driver = New-Object OpenQA.Selenium.Edge.EdgeDriver($edgeOpts)
-} else {
-    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver.ChromeDriver -ProviderName NuGet).Source -Parent) "lib\net48\chromedriver.exe") -ErrorAction SilentlyContinue | Out-Null
-    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver -ProviderName NuGet).Source -Parent) "lib\net48\WebDriver.dll") | Out-Null
-    $chromeOpts = New-Object OpenQA.Selenium.Chrome.ChromeOptions
-    $chromeOpts.AddArgument("--user-data-dir=$BrowserProfile")
-    if ($Headless) { $chromeOpts.AddArgument("--headless=new"); $chromeOpts.AddArgument("--disable-gpu") }
-    $driver = New-Object OpenQA.Selenium.Chrome.ChromeDriver($chromeOpts)
+# Load SharePoint PowerShell Snap-in
+Write-Host "Loading SharePoint PowerShell..." -ForegroundColor Yellow
+try {
+    Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop
+    Write-Host "SharePoint PowerShell loaded successfully" -ForegroundColor Green
+}
+catch {
+    Write-Error "Failed to load SharePoint PowerShell. Ensure you're running on a SharePoint server."
+    exit 1
 }
 
-# Small helper: call Chrome/Edge DevTools "Page.printToPDF"
-function Invoke-PrintToPdf {
+# Function to export using Chrome headless
+function Export-WithChrome {
     param(
-        [OpenQA.Selenium.IWebDriver] $Driver
+        [string]$Url,
+        [string]$OutputFile,
+        [string]$ChromePath
     )
-    $params = @{
-        landscape        = $false
-        printBackground  = $true
-        preferCSSPageSize= $true
-        scale            = 1.0
-        paperWidth       = 8.27   # A4; use 8.5/11 for Letter
-        paperHeight      = 11.69
-        marginTop        = 0.4
-        marginBottom     = 0.4
-        marginLeft       = 0.4
-        marginRight      = 0.4
-    }
-    # ExecuteCdpCommand returns a dict with "data" = base64 PDF
-    $res = $Driver.ExecuteCdpCommand("Page.printToPDF", $params)
-    return [System.Convert]::FromBase64String($res["data"])
-}
-
-# 3) Enumerate items and print each form to PDF
-$items = Get-PnPListItem -List $ListName -PageSize 5000 -ScriptBlock { Param($items) $items }
-$idx = 0
-foreach ($it in $items) {
-    $idx++
-    $id = $it.Id
-
-    # Build URL to the Display Form; Nintex hooks this and renders the Nintex form.
-    $displayUrl = "$siteBase$dispRel?ID=$id"
-
-    # Build a nice file name: e.g., "123 - Test.pdf"
-    $nameParts = @()
-    foreach ($f in $PdfNameFields) {
-        if ($it.FieldValues.ContainsKey($f) -and $it[$f]) { $nameParts += ($it[$f].ToString().Trim()) }
-    }
-    $safeName = ($nameParts -join " - ")
-    if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = "Item" }
-    $fileName = "{0:D5} - ID{1} - {2}.pdf" -f $idx,$id,($safeName -replace '[\\/:*?"<>|]','_')
-    $outPath  = Join-Path $OutputFolder $fileName
-
-    Write-Host ("[{0}/{1}] {2}" -f $idx,$items.Count,$displayUrl)
-
+    
+    $arguments = @(
+        "--headless",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-web-security",
+        "--disable-features=VizDisplayCompositor",
+        "--virtual-time-budget=15000",
+        "--run-all-compositor-stages-before-draw",
+        "--print-to-pdf=`"$OutputFile`"",
+        "--print-to-pdf-no-header",
+        "`"$Url`""
+    )
+    
     try {
-        $driver.Navigate().GoToUrl($displayUrl)
-
-        # give the Nintex form time to render client-side (rules, repeating sections, etc.)
-        Start-Sleep -Milliseconds $PageLoadWaitMs
-
-        # If your form shows a watermark or needs a specific CSS for print,
-        # you could inject JS here to tweak the DOM before printing.
-
-        $pdfBytes = Invoke-PrintToPdf -Driver $driver
-        [IO.File]::WriteAllBytes($outPath, $pdfBytes)
+        $process = Start-Process -FilePath $ChromePath -ArgumentList $arguments -Wait -NoNewWindow -PassThru
+        
+        # Wait a moment for file to be written
+        Start-Sleep -Seconds 2
+        
+        if (Test-Path $OutputFile -and (Get-Item $OutputFile).Length -gt 1KB) {
+            return $true
+        } else {
+            return $false
+        }
     }
     catch {
-        Write-Warning "Failed to export ID=$id : $($_.Exception.Message)"
+        Write-Warning "Chrome export failed: $($_.Exception.Message)"
+        return $false
     }
 }
 
-$driver.Quit()
-Write-Host "Done. PDFs in: $OutputFolder"
+# Function to export using wkhtmltopdf
+function Export-WithWkhtmltopdf {
+    param(
+        [string]$Url,
+        [string]$OutputFile,
+        [string]$WkhtmltopdfPath
+    )
+    
+    $arguments = @(
+        "--page-size", "A4",
+        "--margin-top", "0.75in",
+        "--margin-right", "0.75in",
+        "--margin-bottom", "0.75in", 
+        "--margin-left", "0.75in",
+        "--encoding", "UTF-8",
+        "--no-outline",
+        "--enable-local-file-access",
+        "--load-error-handling", "ignore",
+        "--load-media-error-handling", "ignore",
+        "--javascript-delay", "5000",
+        "--no-stop-slow-scripts",
+        "`"$Url`"",
+        "`"$OutputFile`""
+    )
+    
+    try {
+        $process = Start-Process -FilePath $WkhtmltopdfPath -ArgumentList $arguments -Wait -NoNewWindow -PassThru
+        
+        if (Test-Path $OutputFile -and (Get-Item $OutputFile).Length -gt 1KB) {
+            return $true
+        } else {
+            return $false
+        }
+    }
+    catch {
+        Write-Warning "wkhtmltopdf export failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# Function to get all list items using SharePoint Object Model
+function Get-SharePointListItems {
+    param(
+        [string]$WebUrl,
+        [string]$ListName
+    )
+    
+    Write-Host "Connecting to SharePoint site: $WebUrl" -ForegroundColor Yellow
+    
+    try {
+        # Get the SharePoint site and web
+        $site = Get-SPSite $WebUrl
+        if (!$site) {
+            $site = Get-SPSite | Where-Object { $_.Url -like "*$WebUrl*" -or $_.RootWeb.Url -eq $WebUrl }
+        }
+        
+        if (!$site) {
+            throw "Could not find site with URL: $WebUrl"
+        }
+        
+        $web = $site.OpenWeb()
+        Write-Host "Connected to web: $($web.Title)" -ForegroundColor Green
+        
+        # Get the list
+        $list = $web.Lists.TryGetList($ListName)
+        if (!$list) {
+            # Try by display name
+            $list = $web.Lists | Where-Object { $_.Title -eq $ListName }
+        }
+        
+        if (!$list) {
+            throw "List '$ListName' not found in web '$($web.Title)'"
+        }
+        
+        Write-Host "Found list: $($list.Title) with $($list.ItemCount) items" -ForegroundColor Green
+        
+        $formData = @()
+        $itemCount = 0
+        
+        # Get all items
+        foreach ($item in $list.Items) {
+            $itemCount++
+            $itemId = $item.ID
+            
+            # Clean the title for use in filename
+            $title = "NoTitle"
+            if ($item["Title"] -and $item["Title"].ToString().Trim() -ne "") {
+                $title = $item["Title"].ToString().Trim() -replace '[\\/:*?"<>|]', '_'
+                # Limit title length for filename
+                if ($title.Length -gt 50) {
+                    $title = $title.Substring(0, 47) + "..."
+                }
+            }
+            
+            # Construct potential Nintex form URLs
+            $webUrl = $web.Url
+            $possibleUrls = @(
+                "$webUrl/Lists/$($list.RootFolder.Name)/Item/displayifs.aspx?ID=$itemId",
+                "$webUrl/Lists/$($list.RootFolder.Name)/DispForm.aspx?ID=$itemId",
+                "$webUrl/_layouts/15/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId",
+                "$webUrl/_layouts/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId"
+            )
+            
+            # Use the first URL pattern as default (adjust if needed)
+            $formUrl = $possibleUrls[0]
+            
+            $itemData = [PSCustomObject]@{
+                Id = $itemId
+                Title = $title
+                Url = $formUrl
+                Created = $item["Created"]
+                Modified = $item["Modified"]
+                ListName = $list.Title
+            }
+            
+            $formData += $itemData
+            
+            # Progress indicator for large lists
+            if ($itemCount % 100 -eq 0) {
+                Write-Host "Processed $itemCount items..." -ForegroundColor Gray
+            }
+        }
+        
+        Write-Host "Retrieved $($formData.Count) form items" -ForegroundColor Green
+        
+        # Dispose SharePoint objects
+        $web.Dispose()
+        $site.Dispose()
+        
+        return $formData
+        
+    }
+    catch {
+        Write-Error "Failed to get SharePoint list items: $($_.Exception.Message)"
+        
+        # Cleanup on error
+        if ($web) { $web.Dispose() }
+        if ($site) { $site.Dispose() }
+        
+        return @()
+    }
+}
+
+# Function to test if a URL is accessible
+function Test-FormUrl {
+    param([string]$Url)
+    
+    try {
+        $response = Invoke-WebRequest -Uri $Url -Method Head -UseDefaultCredentials -TimeoutSec 10
+        return $response.StatusCode -eq 200
+    }
+    catch {
+        return $false
+    }
+}
+
+# Main execution
+Write-Host "=== Nintex Forms PDF Export ===" -ForegroundColor Cyan
+Write-Host "SharePoint Web: $WebUrl" -ForegroundColor White
+Write-Host "List Name: $ListName" -ForegroundColor White
+Write-Host "Output Path: $OutputPath" -ForegroundColor White
+Write-Host "Export Method: $Method" -ForegroundColor White
+Write-Host "Batch Size: $BatchSize" -ForegroundColor White
+
+# Validate Chrome/wkhtmltopdf availability
+switch ($Method.ToLower()) {
+    "chrome" {
+        if (!(Test-Path $ChromePath)) {
+            Write-Error "Chrome not found at: $ChromePath"
+            Write-Host "Please install Chrome or specify correct path with -ChromePath parameter"
+            exit 1
+        }
+        Write-Host "Using Chrome at: $ChromePath" -ForegroundColor Green
+    }
+    "wkhtmltopdf" {
+        if (!(Test-Path $wkhtmltopdfPath)) {
+            Write-Error "wkhtmltopdf not found at: $wkhtmltopdfPath"
+            Write-Host "Please install wkhtmltopdf or specify correct path with -wkhtmltopdfPath parameter"
+            exit 1
+        }
+        Write-Host "Using wkhtmltopdf at: $wkhtmltopdfPath" -ForegroundColor Green
+    }
+    default {
+        Write-Error "Invalid method: $Method. Use 'Chrome' or 'wkhtmltopdf'"
+        exit 1
+    }
+}
+
+# Create output directory
+if (!(Test-Path -Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    Write-Host "Created output directory: $OutputPath" -ForegroundColor Green
+}
+
+# Get all form items
+Write-Host "`nRetrieving list items..." -ForegroundColor Yellow
+$forms = Get-SharePointListItems -WebUrl $WebUrl -ListName $ListName
+
+if ($forms.Count -eq 0) {
+    Write-Host "No forms found. Exiting." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Found $($forms.Count) forms to export`n" -ForegroundColor Green
+
+# Test first form URL to validate URL pattern
+Write-Host "Testing first form URL..." -ForegroundColor Yellow
+$testForm = $forms[0]
+Write-Host "Test URL: $($testForm.Url)" -ForegroundColor Gray
+
+if (Test-FormUrl -Url $testForm.Url) {
+    Write-Host "✓ URL pattern appears correct" -ForegroundColor Green
+} else {
+    Write-Host "⚠ URL pattern may need adjustment" -ForegroundColor Yellow
+    Write-Host "If exports fail, you may need to modify the URL pattern in the script" -ForegroundColor Yellow
+}
+
+# Process forms in batches
+$successCount = 0
+$failureCount = 0
+$processedCount = 0
+
+for ($i = 0; $i -lt $forms.Count; $i += $BatchSize) {
+    $batch = $forms[$i..([Math]::Min($i + $BatchSize - 1, $forms.Count - 1))]
+    $batchNumber = [Math]::Floor($i / $BatchSize) + 1
+    $totalBatches = [Math]::Ceiling($forms.Count / $BatchSize)
+    
+    Write-Host "`nProcessing batch $batchNumber of $totalBatches ($($batch.Count) items)..." -ForegroundColor Cyan
+    
+    foreach ($form in $batch) {
+        $processedCount++
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $fileName = "NintexForm_ID$($form.Id)_$($form.Title)_$timestamp.pdf"
+        $outputFile = Join-Path -Path $OutputPath -ChildPath $fileName
+        
+        Write-Host "[$processedCount/$($forms.Count)] Processing ID $($form.Id): $($form.Title)" -ForegroundColor White
+        
+        $success = $false
+        
+        switch ($Method.ToLower()) {
+            "chrome" {
+                $success = Export-WithChrome -Url $form.Url -OutputFile $outputFile -ChromePath $ChromePath
+            }
+            "wkhtmltopdf" {
+                $success = Export-WithWkhtmltopdf -Url $form.Url -OutputFile $outputFile -WkhtmltopdfPath $wkhtmltopdfPath
+            }
+        }
+        
+        if ($success) {
+            $successCount++
+            $fileSize = [Math]::Round((Get-Item $outputFile).Length / 1KB, 1)
+            Write-Host "  ✓ Success ($fileSize KB)" -ForegroundColor Green
+        } else {
+            $failureCount++
+            Write-Host "  ✗ Failed" -ForegroundColor Red
+            
+            # Log failed URL for troubleshooting
+            "$($form.Url)" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
+        }
+        
+        # Overall progress
+        $percentComplete = [Math]::Round(($processedCount / $forms.Count) * 100, 1)
+        Write-Progress -Activity "Exporting Nintex Forms" -Status "$processedCount of $($forms.Count) processed" -PercentComplete $percentComplete
+    }
+    
+    # Small delay between batches to prevent overwhelming the system
+    if ($i + $BatchSize -lt $forms.Count) {
+        Write-Host "Pausing between batches..." -ForegroundColor Gray
+        Start-Sleep -Seconds 2
+    }
+}
+
+# Final summary
+Write-Progress -Activity "Exporting Nintex Forms" -Completed
+
+Write-Host "`n=== EXPORT SUMMARY ===" -ForegroundColor Yellow
+Write-Host "Total forms processed: $($forms.Count)" -ForegroundColor White
+Write-Host "Successful exports: $successCount" -ForegroundColor Green
+Write-Host "Failed exports: $failureCount" -ForegroundColor Red
+Write-Host "Success rate: $([Math]::Round(($successCount / $forms.Count) * 100, 1))%" -ForegroundColor White
+Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
+
+# Create detailed log
+$logData = @{
+    ExportDate = Get-Date
+    WebUrl = $WebUrl
+    ListName = $ListName
+    ExportMethod = $Method
+    TotalForms = $forms.Count
+    SuccessfulExports = $successCount
+    FailedExports = $failureCount
+    OutputPath = $OutputPath
+    BatchSize = $BatchSize
+}
+
+$logPath = Join-Path -Path $OutputPath -ChildPath "ExportLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
+$logData | ConvertTo-Json -Depth 2 | Out-File -FilePath $logPath -Encoding UTF8
+
+Write-Host "`nDetailed log saved: $logPath" -ForegroundColor Cyan
+
+if ($failureCount -gt 0) {
+    Write-Host "Failed URLs logged to: $OutputPath\FailedURLs.txt" -ForegroundColor Yellow
+}
+
+Write-Host "`nExport completed!" -ForegroundColor Green
