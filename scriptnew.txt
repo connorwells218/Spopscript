@@ -1,251 +1,107 @@
-# Simple Direct Nintex Export - Manual URL Construction
-# This version avoids complex SharePoint Object Model calls that are causing errors
-
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$WebUrl,
-    
-    [Parameter(Mandatory=$true)]
-    [string]$ListName,
-    
-    [Parameter(Mandatory=$true)]
-    [string]$OutputPath,
-    
-    [Parameter(Mandatory=$false)]
+    [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
+    [string]$ListName = "OnboardingList", 
+    [string]$OutputPath = "C:\Exports\NintexForms",
     [int]$StartID = 1,
-    
-    [Parameter(Mandatory=$false)]
-    [int]$EndID = 100,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$ChromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+    [int]$EndID = 10
 )
 
-# Function to export using Chrome headless
-function Export-WithChrome {
-    param(
-        [string]$Url,
-        [string]$OutputFile,
-        [string]$ChromePath
-    )
-    
-    Write-Host "  Attempting: $Url" -ForegroundColor Gray
-    
-    $arguments = @(
-        "--headless",
-        "--disable-gpu", 
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-web-security",
-        "--virtual-time-budget=10000",
-        "--print-to-pdf=`"$OutputFile`"",
-        "--print-to-pdf-no-header",
-        "`"$Url`""
-    )
-    
-    try {
-        $process = Start-Process -FilePath $ChromePath -ArgumentList $arguments -Wait -NoNewWindow -PassThru
-        Start-Sleep -Seconds 3
-        
-        if (Test-Path $OutputFile) {
-            $fileSize = (Get-Item $OutputFile).Length
-            if ($fileSize -gt 1KB) {
-                Write-Host "  ✓ Success ($([Math]::Round($fileSize/1KB, 1)) KB)" -ForegroundColor Green
-                return $true
-            } else {
-                Write-Host "  ✗ PDF too small, likely an error page" -ForegroundColor Yellow
-                Remove-Item $OutputFile -Force -ErrorAction SilentlyContinue
-                return $false
-            }
-        } else {
-            Write-Host "  ✗ No PDF created" -ForegroundColor Red
-            return $false
-        }
-    } catch {
-        Write-Host "  ✗ Export failed: $($_.Exception.Message)" -ForegroundColor Red
-        return $false
-    }
-}
-
-# Function to test if URL returns valid content
-function Test-NintexUrl {
-    param([string]$Url)
-    
-    try {
-        $request = [System.Net.WebRequest]::Create($Url)
-        $request.Method = "HEAD"
-        $request.Timeout = 8000
-        $request.UseDefaultCredentials = $true
-        $request.AllowAutoRedirect = $false
-        
-        $response = $request.GetResponse()
-        $statusCode = [int]$response.StatusCode
-        $response.Close()
-        
-        # Check for successful response or redirect
-        return ($statusCode -eq 200 -or $statusCode -eq 302)
-    } catch {
-        return $false
-    }
-}
-
-# Main execution
-Write-Host "=== Simple Nintex Forms Export ===" -ForegroundColor Cyan
-Write-Host "Web URL: $WebUrl" -ForegroundColor White
-Write-Host "List Name: $ListName" -ForegroundColor White  
-Write-Host "ID Range: $StartID to $EndID" -ForegroundColor White
-Write-Host "Output Path: $OutputPath" -ForegroundColor White
-
-# Validate Chrome
-if (!(Test-Path $ChromePath)) {
-    Write-Error "Chrome not found at: $ChromePath"
-    
-    # Try to find Chrome in common locations
-    $chromePaths = @(
-        "C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        "${env:LOCALAPPDATA}\Google\Chrome\Application\chrome.exe"
-    )
-    
-    foreach ($path in $chromePaths) {
-        if (Test-Path $path) {
-            Write-Host "Found Chrome at: $path" -ForegroundColor Green
-            $ChromePath = $path
-            break
-        }
-    }
-    
-    if (!(Test-Path $ChromePath)) {
-        Write-Error "Chrome not found in any common location. Please install Chrome or specify path."
-        exit 1
-    }
-}
-
-Write-Host "✓ Using Chrome at: $ChromePath" -ForegroundColor Green
+Write-Host "=== Basic Nintex Forms Export ===" -ForegroundColor Green
+Write-Host "Web URL: $WebUrl"
+Write-Host "List Name: $ListName"
+Write-Host "Output Path: $OutputPath"
+Write-Host "ID Range: $StartID to $EndID"
 
 # Create output directory
 if (!(Test-Path -Path $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-    Write-Host "✓ Created output directory: $OutputPath" -ForegroundColor Green
+    Write-Host "Created output directory: $OutputPath" -ForegroundColor Green
 }
 
-# Clean the list name for URL construction
-$listUrlName = $ListName -replace ' ', '%20'  # URL encode spaces
-$listFolderName = $ListName -replace ' ', ''   # Remove spaces for folder name
-
-# Define possible URL patterns for your Nintex forms
-$urlPatterns = @(
-    "$WebUrl/Lists/$listFolderName/Item/displayifs.aspx?ID={0}",
-    "$WebUrl/Lists/$listUrlName/Item/displayifs.aspx?ID={0}",
-    "$WebUrl/Lists/$listFolderName/DispForm.aspx?ID={0}",
-    "$WebUrl/Lists/$listUrlName/DispForm.aspx?ID={0}",
-    "$WebUrl/_layouts/15/listform.aspx?PageType=4&ListId={1}&ID={0}",
-    "$WebUrl/_layouts/listform.aspx?PageType=4&ListId={1}&ID={0}"
+# Find Chrome
+$ChromePath = ""
+$chromePaths = @(
+    "C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 )
 
-Write-Host "`nTesting URL patterns with ID $StartID..." -ForegroundColor Yellow
-
-$workingPattern = $null
-foreach ($i = 0; $i -lt $urlPatterns.Count; $i++) {
-    $testUrl = $urlPatterns[$i] -f $StartID, "LISTID_PLACEHOLDER"
-    Write-Host "Testing pattern $($i+1): $testUrl" -ForegroundColor Gray
-    
-    if (Test-NintexUrl -Url $testUrl) {
-        Write-Host "✓ Pattern $($i+1) appears to work!" -ForegroundColor Green
-        $workingPattern = $urlPatterns[$i]
+foreach ($path in $chromePaths) {
+    if (Test-Path $path) {
+        $ChromePath = $path
+        Write-Host "Found Chrome at: $ChromePath" -ForegroundColor Green
         break
-    } else {
-        Write-Host "✗ Pattern $($i+1) failed" -ForegroundColor Red
     }
 }
 
-if (!$workingPattern) {
-    Write-Warning "No URL pattern responded successfully. Using first pattern anyway..."
-    $workingPattern = $urlPatterns[0]
+if ($ChromePath -eq "") {
+    Write-Host "Chrome not found! Please install Google Chrome." -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "`nUsing URL pattern: $workingPattern" -ForegroundColor Cyan
+# Test a few common URL patterns
+$patterns = @(
+    "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
+    "$WebUrl/Lists/OnboardingList/Item/displayifs.aspx?ID={0}",
+    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}"
+)
 
-# Process each ID in the range
+Write-Host "`nTesting URL patterns..." -ForegroundColor Yellow
+
+$workingPattern = $patterns[0]  # Default to first pattern
+
+Write-Host "Using URL pattern: $workingPattern" -ForegroundColor Cyan
+
 $successCount = 0
 $failureCount = 0
-$notFoundCount = 0
-
-Write-Host "`nStarting export..." -ForegroundColor Yellow
 
 for ($id = $StartID; $id -le $EndID; $id++) {
-    $formUrl = $workingPattern -f $id, "UNKNOWN_LISTID"
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $fileName = "NintexForm_ID$id`_$timestamp.pdf"
+    $formUrl = $workingPattern -f $id
+    $fileName = "NintexForm_ID$id.pdf"
     $outputFile = Join-Path -Path $OutputPath -ChildPath $fileName
     
-    Write-Host "`n[$id/$EndID] Testing ID $id..." -ForegroundColor White
+    Write-Host "`nProcessing ID $id..." -ForegroundColor White
+    Write-Host "URL: $formUrl" -ForegroundColor Gray
     
-    # First check if the URL exists
-    if (!(Test-NintexUrl -Url $formUrl)) {
-        Write-Host "  ⚬ ID $id not found (likely doesn't exist)" -ForegroundColor Yellow
-        $notFoundCount++
-        continue
+    # Chrome arguments for PDF export
+    $chromeArgs = @(
+        "--headless",
+        "--disable-gpu",
+        "--no-sandbox", 
+        "--print-to-pdf=`"$outputFile`"",
+        "`"$formUrl`""
+    )
+    
+    try {
+        # Run Chrome to generate PDF
+        Start-Process -FilePath $ChromePath -ArgumentList $chromeArgs -Wait -NoNewWindow
+        
+        # Check if PDF was created
+        if (Test-Path $outputFile) {
+            $fileSize = (Get-Item $outputFile).Length
+            if ($fileSize -gt 1000) {
+                Write-Host "SUCCESS - PDF created ($fileSize bytes)" -ForegroundColor Green
+                $successCount++
+            } else {
+                Write-Host "FAILED - PDF too small (likely error page)" -ForegroundColor Red
+                Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+                $failureCount++
+            }
+        } else {
+            Write-Host "FAILED - No PDF created" -ForegroundColor Red
+            $failureCount++
+        }
     }
-    
-    Write-Host "  ✓ ID $id exists, exporting..." -ForegroundColor Green
-    
-    # Attempt to export
-    $success = Export-WithChrome -Url $formUrl -OutputFile $outputFile -ChromePath $ChromePath
-    
-    if ($success) {
-        $successCount++
-    } else {
+    catch {
+        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
         $failureCount++
-        # Log failed URL
-        "$formUrl" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
     }
     
-    # Progress indicator
-    $processed = $id - $StartID + 1
-    $total = $EndID - $StartID + 1
-    $percentComplete = [Math]::Round(($processed / $total) * 100, 1)
-    Write-Progress -Activity "Exporting Nintex Forms" -Status "ID $id - $successCount successful, $failureCount failed, $notFoundCount not found" -PercentComplete $percentComplete
-    
-    # Small delay to avoid overwhelming the server
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Seconds 1
 }
 
-# Final summary
-Write-Progress -Activity "Exporting Nintex Forms" -Completed
-
-Write-Host "`n=== EXPORT SUMMARY ===" -ForegroundColor Yellow
-Write-Host "ID Range: $StartID to $EndID" -ForegroundColor White
-Write-Host "Items found: $($successCount + $failureCount)" -ForegroundColor White
-Write-Host "Successful exports: $successCount" -ForegroundColor Green
+Write-Host "`n=== SUMMARY ===" -ForegroundColor Yellow
+Write-Host "Successful exports: $successCount" -ForegroundColor Green  
 Write-Host "Failed exports: $failureCount" -ForegroundColor Red
-Write-Host "IDs not found: $notFoundCount" -ForegroundColor Yellow
 Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
 
-if ($successCount + $failureCount -gt 0) {
-    $successRate = [Math]::Round(($successCount / ($successCount + $failureCount)) * 100, 1)
-    Write-Host "Success rate: $successRate%" -ForegroundColor White
-}
-
-if ($failureCount -gt 0) {
-    Write-Host "`nFailed URLs logged to: $OutputPath\FailedURLs.txt" -ForegroundColor Yellow
-}
-
-# Create summary log
-$summary = @{
-    ExportDate = Get-Date
-    WebUrl = $WebUrl
-    ListName = $ListName
-    IDRange = "$StartID-$EndID"
-    URLPattern = $workingPattern
-    SuccessfulExports = $successCount
-    FailedExports = $failureCount
-    NotFound = $notFoundCount
-    OutputPath = $OutputPath
-} | ConvertTo-Json -Depth 2
-
-$summaryFile = Join-Path -Path $OutputPath -ChildPath "ExportSummary_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-$summary | Out-File -FilePath $summaryFile -Encoding UTF8
-
-Write-Host "Summary saved to: $summaryFile" -ForegroundColor Cyan
-Write-Host "`nExport completed!" -ForegroundColor Green
+Write-Host "`nDone!" -ForegroundColor Green
