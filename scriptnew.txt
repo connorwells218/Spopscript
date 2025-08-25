@@ -1,68 +1,178 @@
-# Ultra Simple Nintex Export - No Parameters to Avoid Syntax Issues
-Write-Host "Ultra Simple Nintex Export" -ForegroundColor Green
+# Chrome Profile Export Script
+# Uses your existing Chrome profile to maintain authentication
 
-# Fixed settings - edit these directly in the script
+# Configuration
 $webUrl = "https://sp.safalo.com/hr"
 $listName = "OnboardingList"
 $outputPath = "C:\Exports\NintexForms"
 $startID = 1
 $endID = 10
 
+Write-Host "Chrome Profile Export Script" -ForegroundColor Green
 Write-Host "Web: $webUrl"
 Write-Host "List: $listName"
 Write-Host "Output: $outputPath"
 Write-Host "IDs: $startID to $endID"
+Write-Host ""
 
-# Create output folder
+# Create output directory
 if (!(Test-Path $outputPath)) {
     New-Item -ItemType Directory -Path $outputPath -Force
+    Write-Host "Created directory: $outputPath"
 }
 
 # Find Chrome
-$chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-if (!(Test-Path $chrome)) {
+$chrome = ""
+if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
+    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+}
+elseif (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
     $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 }
-
-if (!(Test-Path $chrome)) {
-    Write-Host "Chrome not found" -ForegroundColor Red
-    exit
+else {
+    Write-Host "Chrome not found!" -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "Chrome: $chrome"
-Write-Host ""
-Write-Host "Make sure you're logged into SharePoint in Chrome first!" -ForegroundColor Yellow
-Write-Host ""
+Write-Host "Using Chrome: $chrome"
 
-$success = 0
+# Find Chrome profile directory
+$possibleProfiles = @(
+    "$env:LOCALAPPDATA\Google\Chrome\User Data",
+    "$env:USERPROFILE\AppData\Local\Google\Chrome\User Data",
+    "$env:APPDATA\..\Local\Google\Chrome\User Data"
+)
 
-for ($id = $startID; $id -le $endID; $id++) {
-    $url = "$webUrl/Lists/$listName/DispForm.aspx?ID=$id"
-    $pdfFile = "$outputPath\Form_ID$id.pdf"
-    
-    Write-Host "Processing ID $id"
-    Write-Host "  $url"
-    
-    # Simple Chrome command
-    $arguments = "--headless --disable-gpu --no-sandbox --print-to-pdf=`"$pdfFile`" `"$url`""
-    
-    Start-Process -FilePath $chrome -ArgumentList $arguments -Wait -NoNewWindow
-    
-    Start-Sleep -Seconds 2
-    
-    if (Test-Path $pdfFile) {
-        $size = (Get-Item $pdfFile).Length
-        if ($size -gt 1000) {
-            Write-Host "  SUCCESS ($size bytes)" -ForegroundColor Green
-            $success++
-        } else {
-            Write-Host "  FAILED (too small)" -ForegroundColor Red
-        }
-    } else {
-        Write-Host "  FAILED (no file)" -ForegroundColor Red
+$profilePath = ""
+foreach ($path in $possibleProfiles) {
+    if (Test-Path "$path\Default") {
+        $profilePath = $path
+        Write-Host "Found Chrome profile: $profilePath"
+        break
     }
 }
 
+if ($profilePath -eq "") {
+    Write-Host "Chrome profile not found. Using default method." -ForegroundColor Yellow
+    $profilePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+}
+
 Write-Host ""
-Write-Host "Completed: $success successful exports" -ForegroundColor Green
-Write-Host "Files in: $outputPath"
+Write-Host "IMPORTANT: Make sure you are logged into SharePoint in Chrome first!" -ForegroundColor Yellow
+Write-Host "1. Open Chrome and go to: $webUrl"
+Write-Host "2. Login with your credentials"
+Write-Host "3. Test that you can view a form manually"
+Write-Host "4. Keep Chrome open during export"
+Write-Host ""
+
+$continue = Read-Host "Are you logged into SharePoint in Chrome? (y/n)"
+if ($continue -ne "y" -and $continue -ne "Y") {
+    Write-Host "Please login to SharePoint in Chrome first, then run this script again."
+    exit 0
+}
+
+Write-Host ""
+Write-Host "Starting export using your Chrome profile..." -ForegroundColor Green
+Write-Host ""
+
+$successCount = 0
+$failedCount = 0
+
+# Export each form
+for ($id = $startID; $id -le $endID; $id++) {
+    $url = "$webUrl/Lists/$listName/DispForm.aspx?ID=$id"
+    $pdfFile = "$outputPath\NintexForm_ID$id.pdf"
+    
+    Write-Host "Processing ID $id..." -ForegroundColor White
+    Write-Host "  URL: $url" -ForegroundColor Gray
+    
+    # Chrome arguments using your profile
+    $chromeArgs = @(
+        "--headless",
+        "--disable-gpu",
+        "--no-sandbox", 
+        "--disable-dev-shm-usage",
+        "--user-data-dir=`"$profilePath`"",
+        "--profile-directory=Default",
+        "--disable-extensions",
+        "--disable-plugins",
+        "--virtual-time-budget=12000",
+        "--run-all-compositor-stages-before-draw",
+        "--print-to-pdf=`"$pdfFile`"",
+        "`"$url`""
+    )
+    
+    try {
+        # Start Chrome with your profile
+        $process = Start-Process -FilePath $chrome -ArgumentList $chromeArgs -Wait -NoNewWindow -PassThru
+        
+        # Wait for PDF generation
+        Start-Sleep -Seconds 3
+        
+        if (Test-Path $pdfFile) {
+            $fileSize = (Get-Item $pdfFile).Length
+            if ($fileSize -gt 3000) {
+                Write-Host "  SUCCESS - PDF created ($fileSize bytes)" -ForegroundColor Green
+                $successCount++
+            }
+            elseif ($fileSize -gt 500) {
+                Write-Host "  WARNING - Small PDF ($fileSize bytes), may be error page" -ForegroundColor Yellow
+                # Keep the file but rename it for inspection
+                $errorFile = $pdfFile -replace "\.pdf$", "_small.pdf"
+                Move-Item $pdfFile $errorFile
+                Write-Host "  Renamed to: $(Split-Path $errorFile -Leaf)" -ForegroundColor Gray
+                $failedCount++
+            }
+            else {
+                Write-Host "  FAILED - PDF too small ($fileSize bytes)" -ForegroundColor Red
+                Remove-Item $pdfFile -Force -ErrorAction SilentlyContinue
+                $failedCount++
+            }
+        }
+        else {
+            Write-Host "  FAILED - No PDF created" -ForegroundColor Red
+            $failedCount++
+        }
+    }
+    catch {
+        Write-Host "  ERROR - $($_.Exception.Message)" -ForegroundColor Red
+        $failedCount++
+    }
+    
+    # Small delay between requests
+    Start-Sleep -Seconds 2
+}
+
+# Summary
+Write-Host ""
+Write-Host "=== EXPORT SUMMARY ===" -ForegroundColor Cyan
+Write-Host "Total IDs processed: $($successCount + $failedCount)" -ForegroundColor White
+Write-Host "Successful exports: $successCount" -ForegroundColor Green
+Write-Host "Failed exports: $failedCount" -ForegroundColor Red
+
+if ($successCount + $failedCount -gt 0) {
+    $successRate = [Math]::Round(($successCount / ($successCount + $failedCount)) * 100, 1)
+    Write-Host "Success rate: $successRate%" -ForegroundColor White
+}
+
+Write-Host "Output directory: $outputPath" -ForegroundColor Cyan
+
+# Additional troubleshooting info
+if ($failedCount -gt 0) {
+    Write-Host ""
+    Write-Host "If exports failed, try these steps:" -ForegroundColor Yellow
+    Write-Host "1. Verify you can manually open the URLs in Chrome while logged in"
+    Write-Host "2. Check if Chrome is asking for credentials in the regular browser"
+    Write-Host "3. Try closing all Chrome windows and logging in again"
+    Write-Host "4. Some IDs may not exist - check which IDs actually have forms"
+}
+
+# Show first few URLs for manual testing
+Write-Host ""
+Write-Host "Test URLs manually in Chrome:" -ForegroundColor Cyan
+for ($i = $startID; $i -le [Math]::Min($startID + 2, $endID); $i++) {
+    Write-Host "  $webUrl/Lists/$listName/DispForm.aspx?ID=$i" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "Export completed!" -ForegroundColor Green
