@@ -1,16 +1,27 @@
-# Minimal Nintex Export Script
+# Nintex Export with Authentication
 param(
     [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
     [string]$ListName = "OnboardingList",
     [string]$OutputPath = "C:\Exports\NintexForms",
     [int]$StartID = 1,
-    [int]$EndID = 10
+    [int]$EndID = 10,
+    [string]$Username = "",
+    [string]$Password = ""
 )
 
-Write-Host "Starting Nintex Forms Export..." -ForegroundColor Green
+Write-Host "Nintex Forms Export with Authentication" -ForegroundColor Green
 Write-Host "Web: $WebUrl"
 Write-Host "List: $ListName" 
 Write-Host "IDs: $StartID to $EndID"
+
+# Get credentials if not provided
+if ($Username -eq "" -or $Password -eq "") {
+    $credential = Get-Credential -Message "Enter SharePoint credentials"
+    $Username = $credential.UserName
+    $Password = $credential.GetNetworkCredential().Password
+}
+
+Write-Host "Using username: $Username"
 
 # Create output folder
 if (!(Test-Path $OutputPath)) {
@@ -33,6 +44,106 @@ else {
 
 Write-Host "Using Chrome: $chrome"
 
+# Create a temporary user data directory for Chrome to store auth
+$tempUserData = "$env:TEMP\ChromeAuth_$(Get-Random)"
+New-Item -ItemType Directory -Path $tempUserData -Force | Out-Null
+
+Write-Host "Chrome user data: $tempUserData"
+
+# Method 1: Try with Chrome authentication arguments
+function Export-WithChromeAuth {
+    param($url, $outputFile, $username, $password)
+    
+    $args = @(
+        "--headless",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--user-data-dir=$tempUserData",
+        "--auth-server-whitelist=*",
+        "--auth-negotiate-delegate-whitelist=*",
+        "--print-to-pdf=`"$outputFile`"",
+        "`"$url`""
+    )
+    
+    try {
+        Start-Process -FilePath $chrome -ArgumentList $args -Wait -NoNewWindow
+        return (Test-Path $outputFile -and (Get-Item $outputFile).Length -gt 1000)
+    }
+    catch {
+        return $false
+    }
+}
+
+# Method 2: Try with Invoke-WebRequest to download HTML, then convert
+function Export-WithWebRequest {
+    param($url, $outputFile, $username, $password)
+    
+    try {
+        # Create secure string for password
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
+        
+        # Download the HTML content
+        $htmlContent = Invoke-WebRequest -Uri $url -Credential $credential -UseBasicParsing
+        
+        # Save HTML to temp file
+        $tempHtml = "$env:TEMP\temp_form_$(Get-Random).html"
+        $htmlContent.Content | Out-File -FilePath $tempHtml -Encoding UTF8
+        
+        # Convert HTML to PDF using Chrome
+        $args = @(
+            "--headless",
+            "--disable-gpu", 
+            "--no-sandbox",
+            "--print-to-pdf=`"$outputFile`"",
+            "`"file:///$($tempHtml.Replace('\', '/'))`""
+        )
+        
+        Start-Process -FilePath $chrome -ArgumentList $args -Wait -NoNewWindow
+        
+        # Cleanup temp HTML
+        Remove-Item $tempHtml -Force -ErrorAction SilentlyContinue
+        
+        return (Test-Path $outputFile -and (Get-Item $outputFile).Length -gt 1000)
+    }
+    catch {
+        Write-Host "WebRequest method error: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Method 3: Try with wkhtmltopdf if available
+function Export-WithWkhtmltopdf {
+    param($url, $outputFile, $username, $password)
+    
+    $wkhtmltopdf = "C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe"
+    
+    if (!(Test-Path $wkhtmltopdf)) {
+        return $false
+    }
+    
+    $args = @(
+        "--username", $username,
+        "--password", $password,
+        "--page-size", "A4",
+        "--margin-top", "0.75in",
+        "--margin-right", "0.75in", 
+        "--margin-bottom", "0.75in",
+        "--margin-left", "0.75in",
+        "`"$url`"",
+        "`"$outputFile`""
+    )
+    
+    try {
+        Start-Process -FilePath $wkhtmltopdf -ArgumentList $args -Wait -NoNewWindow
+        return (Test-Path $outputFile -and (Get-Item $outputFile).Length -gt 1000)
+    }
+    catch {
+        return $false
+    }
+}
+
 # Export each ID
 $success = 0
 $failed = 0
@@ -44,40 +155,56 @@ for ($id = $StartID; $id -le $EndID; $id++) {
     Write-Host ""
     Write-Host "ID $id - Testing: $url" -ForegroundColor Yellow
     
-    # Use Chrome to create PDF
-    $args = "--headless", "--disable-gpu", "--no-sandbox", "--print-to-pdf=`"$pdfFile`"", "`"$url`""
+    $exported = $false
     
-    try {
-        Start-Process -FilePath $chrome -ArgumentList $args -Wait -NoNewWindow
-        
-        if (Test-Path $pdfFile) {
-            $size = (Get-Item $pdfFile).Length
-            if ($size -gt 1000) {
-                Write-Host "SUCCESS - $size bytes" -ForegroundColor Green
-                $success++
-            }
-            else {
-                Write-Host "FAILED - File too small" -ForegroundColor Red
-                Remove-Item $pdfFile -Force
-                $failed++
-            }
-        }
-        else {
-            Write-Host "FAILED - No PDF created" -ForegroundColor Red
-            $failed++
-        }
+    # Try Method 1: Chrome with auth
+    Write-Host "  Trying Chrome with auth..." -ForegroundColor Gray
+    $exported = Export-WithChromeAuth -url $url -outputFile $pdfFile -username $Username -password $Password
+    
+    if (!$exported) {
+        Write-Host "  Trying WebRequest method..." -ForegroundColor Gray
+        $exported = Export-WithWebRequest -url $url -outputFile $pdfFile -username $Username -password $Password
     }
-    catch {
-        Write-Host "ERROR - $($_.Exception.Message)" -ForegroundColor Red
+    
+    if (!$exported) {
+        Write-Host "  Trying wkhtmltopdf..." -ForegroundColor Gray
+        $exported = Export-WithWkhtmltopdf -url $url -outputFile $pdfFile -username $Username -password $Password
+    }
+    
+    if ($exported) {
+        $size = (Get-Item $pdfFile).Length
+        Write-Host "  SUCCESS - $size bytes" -ForegroundColor Green
+        $success++
+    }
+    else {
+        Write-Host "  FAILED - All methods failed" -ForegroundColor Red
         $failed++
+        # Log failed URL for troubleshooting
+        "$url" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
     }
     
     Start-Sleep 1
 }
+
+# Cleanup temp directory
+Remove-Item $tempUserData -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== RESULTS ===" -ForegroundColor Cyan
 Write-Host "Successful: $success" -ForegroundColor Green
 Write-Host "Failed: $failed" -ForegroundColor Red
 Write-Host "Files saved to: $OutputPath"
-Write-Host "Done!"
+
+if ($failed -gt 0) {
+    Write-Host ""
+    Write-Host "Failed URLs logged to: $OutputPath\FailedURLs.txt" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "If exports failed, you may need to:" -ForegroundColor Yellow
+    Write-Host "1. Check if the URL pattern is correct for your Nintex forms"
+    Write-Host "2. Verify your username/password are correct"  
+    Write-Host "3. Try accessing one of the URLs manually in browser first"
+    Write-Host "4. Consider using wkhtmltopdf: https://wkhtmltopdf.org/downloads.html"
+}
+
+Write-Host ""
+Write-Host "Done!" -ForegroundColor Green
