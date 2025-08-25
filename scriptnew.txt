@@ -1,107 +1,83 @@
+# Minimal Nintex Export Script
 param(
     [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
-    [string]$ListName = "OnboardingList", 
+    [string]$ListName = "OnboardingList",
     [string]$OutputPath = "C:\Exports\NintexForms",
     [int]$StartID = 1,
     [int]$EndID = 10
 )
 
-Write-Host "=== Basic Nintex Forms Export ===" -ForegroundColor Green
-Write-Host "Web URL: $WebUrl"
-Write-Host "List Name: $ListName"
-Write-Host "Output Path: $OutputPath"
-Write-Host "ID Range: $StartID to $EndID"
+Write-Host "Starting Nintex Forms Export..." -ForegroundColor Green
+Write-Host "Web: $WebUrl"
+Write-Host "List: $ListName" 
+Write-Host "IDs: $StartID to $EndID"
 
-# Create output directory
-if (!(Test-Path -Path $OutputPath)) {
-    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-    Write-Host "Created output directory: $OutputPath" -ForegroundColor Green
+# Create output folder
+if (!(Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath -Force
+    Write-Host "Created folder: $OutputPath"
 }
 
 # Find Chrome
-$ChromePath = ""
-$chromePaths = @(
-    "C:\Program Files\Google\Chrome\Application\chrome.exe",
-    "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-)
-
-foreach ($path in $chromePaths) {
-    if (Test-Path $path) {
-        $ChromePath = $path
-        Write-Host "Found Chrome at: $ChromePath" -ForegroundColor Green
-        break
-    }
+$chrome = ""
+if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
+    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+}
+elseif (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
+    $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"  
+}
+else {
+    Write-Host "Chrome not found!" -ForegroundColor Red
+    exit
 }
 
-if ($ChromePath -eq "") {
-    Write-Host "Chrome not found! Please install Google Chrome." -ForegroundColor Red
-    exit 1
-}
+Write-Host "Using Chrome: $chrome"
 
-# Test a few common URL patterns
-$patterns = @(
-    "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    "$WebUrl/Lists/OnboardingList/Item/displayifs.aspx?ID={0}",
-    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}"
-)
-
-Write-Host "`nTesting URL patterns..." -ForegroundColor Yellow
-
-$workingPattern = $patterns[0]  # Default to first pattern
-
-Write-Host "Using URL pattern: $workingPattern" -ForegroundColor Cyan
-
-$successCount = 0
-$failureCount = 0
+# Export each ID
+$success = 0
+$failed = 0
 
 for ($id = $StartID; $id -le $EndID; $id++) {
-    $formUrl = $workingPattern -f $id
-    $fileName = "NintexForm_ID$id.pdf"
-    $outputFile = Join-Path -Path $OutputPath -ChildPath $fileName
+    $url = "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID=$id"
+    $pdfFile = "$OutputPath\Form_ID$id.pdf"
     
-    Write-Host "`nProcessing ID $id..." -ForegroundColor White
-    Write-Host "URL: $formUrl" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "ID $id - Testing: $url" -ForegroundColor Yellow
     
-    # Chrome arguments for PDF export
-    $chromeArgs = @(
-        "--headless",
-        "--disable-gpu",
-        "--no-sandbox", 
-        "--print-to-pdf=`"$outputFile`"",
-        "`"$formUrl`""
-    )
+    # Use Chrome to create PDF
+    $args = "--headless", "--disable-gpu", "--no-sandbox", "--print-to-pdf=`"$pdfFile`"", "`"$url`""
     
     try {
-        # Run Chrome to generate PDF
-        Start-Process -FilePath $ChromePath -ArgumentList $chromeArgs -Wait -NoNewWindow
+        Start-Process -FilePath $chrome -ArgumentList $args -Wait -NoNewWindow
         
-        # Check if PDF was created
-        if (Test-Path $outputFile) {
-            $fileSize = (Get-Item $outputFile).Length
-            if ($fileSize -gt 1000) {
-                Write-Host "SUCCESS - PDF created ($fileSize bytes)" -ForegroundColor Green
-                $successCount++
-            } else {
-                Write-Host "FAILED - PDF too small (likely error page)" -ForegroundColor Red
-                Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
-                $failureCount++
+        if (Test-Path $pdfFile) {
+            $size = (Get-Item $pdfFile).Length
+            if ($size -gt 1000) {
+                Write-Host "SUCCESS - $size bytes" -ForegroundColor Green
+                $success++
             }
-        } else {
+            else {
+                Write-Host "FAILED - File too small" -ForegroundColor Red
+                Remove-Item $pdfFile -Force
+                $failed++
+            }
+        }
+        else {
             Write-Host "FAILED - No PDF created" -ForegroundColor Red
-            $failureCount++
+            $failed++
         }
     }
     catch {
-        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
-        $failureCount++
+        Write-Host "ERROR - $($_.Exception.Message)" -ForegroundColor Red
+        $failed++
     }
     
-    Start-Sleep -Seconds 1
+    Start-Sleep 1
 }
 
-Write-Host "`n=== SUMMARY ===" -ForegroundColor Yellow
-Write-Host "Successful exports: $successCount" -ForegroundColor Green  
-Write-Host "Failed exports: $failureCount" -ForegroundColor Red
-Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
-
-Write-Host "`nDone!" -ForegroundColor Green
+Write-Host ""
+Write-Host "=== RESULTS ===" -ForegroundColor Cyan
+Write-Host "Successful: $success" -ForegroundColor Green
+Write-Host "Failed: $failed" -ForegroundColor Red
+Write-Host "Files saved to: $OutputPath"
+Write-Host "Done!"
