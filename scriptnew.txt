@@ -125,17 +125,49 @@ function Get-SharePointListItems {
     Write-Host "Connecting to SharePoint site: $WebUrl" -ForegroundColor Yellow
     
     try {
-        # Get the SharePoint site and web
-        $site = Get-SPSite $WebUrl
-        if (!$site) {
-            $site = Get-SPSite | Where-Object { $_.Url -like "*$WebUrl*" -or $_.RootWeb.Url -eq $WebUrl }
-        }
+        # First, try to get the web directly
+        $web = Get-SPWeb $WebUrl -ErrorAction SilentlyContinue
         
-        if (!$site) {
-            throw "Could not find site with URL: $WebUrl"
+        if (!$web) {
+            # If direct web lookup fails, try to find the site collection and then the web
+            Write-Host "Direct web lookup failed, trying to find parent site collection..." -ForegroundColor Yellow
+            
+            # Extract potential site collection URL
+            $uri = [System.Uri]$WebUrl
+            $siteCollectionUrl = "$($uri.Scheme)://$($uri.Host)"
+            
+            # Try common site collection patterns
+            $possibleSiteUrls = @(
+                $siteCollectionUrl,
+                "$siteCollectionUrl/sites/ConnorsWorkshop",
+                "https://sp.safalo.com"
+            )
+            
+            $site = $null
+            foreach ($siteUrl in $possibleSiteUrls) {
+                try {
+                    Write-Host "Trying site collection: $siteUrl" -ForegroundColor Gray
+                    $site = Get-SPSite $siteUrl -ErrorAction SilentlyContinue
+                    if ($site) {
+                        Write-Host "Found site collection: $($site.Url)" -ForegroundColor Green
+                        break
+                    }
+                } catch {
+                    continue
+                }
+            }
+            
+            if (!$site) {
+                throw "Could not find any site collection for URL: $WebUrl"
+            }
+            
+            # Now try to get the specific web
+            try {
+                $web = $site.OpenWeb($WebUrl.Replace($site.Url, "").TrimStart('/'))
+            } catch {
+                $web = $site.OpenWeb()
+            }
         }
-        
-        $web = $site.OpenWeb()
         Write-Host "Connected to web: $($web.Title)" -ForegroundColor Green
         
         # Get the list
@@ -218,7 +250,35 @@ function Get-SharePointListItems {
     }
 }
 
-# Function to test if a URL is accessible
+# Function to discover SharePoint structure
+function Find-SharePointStructure {
+    Write-Host "=== SharePoint Structure Discovery ===" -ForegroundColor Cyan
+    
+    # Get all site collections
+    $siteCollections = Get-SPSite -Limit All
+    Write-Host "`nFound Site Collections:" -ForegroundColor Yellow
+    
+    foreach ($siteCollection in $siteCollections) {
+        Write-Host "  Site Collection: $($siteCollection.Url)" -ForegroundColor White
+        
+        # Get all webs in this site collection
+        foreach ($web in $siteCollection.AllWebs) {
+            if ($web.Url -like "*safalo*" -or $web.Url -like "*Connor*") {
+                Write-Host "    Web: $($web.Url)" -ForegroundColor Green
+                
+                # Look for lists that might contain forms
+                foreach ($list in $web.Lists) {
+                    if ($list.Title -like "*Onboard*" -or $list.Title -like "*Form*" -or $list.ItemCount -gt 0) {
+                        Write-Host "      List: '$($list.Title)' ($($list.ItemCount) items)" -ForegroundColor Cyan
+                    }
+                }
+            }
+            $web.Dispose()
+        }
+    }
+    
+    Write-Host "`n" -ForegroundColor White
+}
 function Test-FormUrl {
     param([string]$Url)
     
