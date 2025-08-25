@@ -1,5 +1,5 @@
-# Nintex Forms PDF Export - SharePoint Server (Classic PowerShell)
-# Run this script directly on the SharePoint Server
+# Robust Nintex Forms PDF Export with Enhanced Error Handling
+# This version handles the Get-SharePointListItems issues seen in your output
 
 param(
     [Parameter(Mandatory=$true)]
@@ -12,16 +12,13 @@ param(
     [string]$OutputPath,
     
     [Parameter(Mandatory=$false)]
-    [string]$Method = "Chrome", # Options: "Chrome", "wkhtmltopdf"
+    [string]$Method = "Chrome",
     
     [Parameter(Mandatory=$false)]
     [string]$ChromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe",
     
     [Parameter(Mandatory=$false)]
-    [string]$wkhtmltopdfPath = "C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe",
-    
-    [Parameter(Mandatory=$false)]
-    [int]$BatchSize = 50  # Process items in batches to avoid memory issues
+    [int]$BatchSize = 50
 )
 
 # Load SharePoint PowerShell Snap-in
@@ -59,8 +56,6 @@ function Export-WithChrome {
     
     try {
         $process = Start-Process -FilePath $ChromePath -ArgumentList $arguments -Wait -NoNewWindow -PassThru
-        
-        # Wait a moment for file to be written
         Start-Sleep -Seconds 2
         
         if (Test-Path $OutputFile -and (Get-Item $OutputFile).Length -gt 1KB) {
@@ -75,48 +70,8 @@ function Export-WithChrome {
     }
 }
 
-# Function to export using wkhtmltopdf
-function Export-WithWkhtmltopdf {
-    param(
-        [string]$Url,
-        [string]$OutputFile,
-        [string]$WkhtmltopdfPath
-    )
-    
-    $arguments = @(
-        "--page-size", "A4",
-        "--margin-top", "0.75in",
-        "--margin-right", "0.75in",
-        "--margin-bottom", "0.75in", 
-        "--margin-left", "0.75in",
-        "--encoding", "UTF-8",
-        "--no-outline",
-        "--enable-local-file-access",
-        "--load-error-handling", "ignore",
-        "--load-media-error-handling", "ignore",
-        "--javascript-delay", "5000",
-        "--no-stop-slow-scripts",
-        "`"$Url`"",
-        "`"$OutputFile`""
-    )
-    
-    try {
-        $process = Start-Process -FilePath $WkhtmltopdfPath -ArgumentList $arguments -Wait -NoNewWindow -PassThru
-        
-        if (Test-Path $OutputFile -and (Get-Item $OutputFile).Length -gt 1KB) {
-            return $true
-        } else {
-            return $false
-        }
-    }
-    catch {
-        Write-Warning "wkhtmltopdf export failed: $($_.Exception.Message)"
-        return $false
-    }
-}
-
-# Function to get all list items using SharePoint Object Model
-function Get-SharePointListItems {
+# Enhanced function to get SharePoint list items with better error handling
+function Get-SharePointListItemsRobust {
     param(
         [string]$WebUrl,
         [string]$ListName
@@ -124,214 +79,219 @@ function Get-SharePointListItems {
     
     Write-Host "Connecting to SharePoint site: $WebUrl" -ForegroundColor Yellow
     
+    $web = $null
+    $site = $null
+    
     try {
-        # First, try to get the web directly
+        # Method 1: Try to get web directly
+        Write-Host "Attempting direct web connection..." -ForegroundColor Gray
         $web = Get-SPWeb $WebUrl -ErrorAction SilentlyContinue
         
-        if (!$web) {
-            # If direct web lookup fails, try to find the site collection and then the web
-            Write-Host "Direct web lookup failed, trying to find parent site collection..." -ForegroundColor Yellow
+        if ($web) {
+            Write-Host "✓ Connected directly to web: $($web.Title)" -ForegroundColor Green
+        } else {
+            # Method 2: Try to find via site collection
+            Write-Host "Direct connection failed, trying site collection approach..." -ForegroundColor Yellow
             
-            # Extract potential site collection URL
-            $uri = [System.Uri]$WebUrl
-            $siteCollectionUrl = "$($uri.Scheme)://$($uri.Host)"
+            # Get all site collections and find the right one
+            $allSites = Get-SPSite -Limit All
             
-            # Try common site collection patterns
-            $possibleSiteUrls = @(
-                $siteCollectionUrl,
-                "$siteCollectionUrl/sites/ConnorsWorkshop",
-                "https://sp.safalo.com"
-            )
-            
-            $site = $null
-            foreach ($siteUrl in $possibleSiteUrls) {
+            foreach ($testSite in $allSites) {
                 try {
-                    Write-Host "Trying site collection: $siteUrl" -ForegroundColor Gray
-                    $site = Get-SPSite $siteUrl -ErrorAction SilentlyContinue
-                    if ($site) {
-                        Write-Host "Found site collection: $($site.Url)" -ForegroundColor Green
-                        break
+                    foreach ($testWeb in $testSite.AllWebs) {
+                        if ($testWeb.Url -eq $WebUrl) {
+                            $web = $testWeb
+                            $site = $testSite
+                            Write-Host "✓ Found web via site collection search: $($web.Title)" -ForegroundColor Green
+                            break
+                        }
                     }
+                    if ($web) { break }
                 } catch {
                     continue
                 }
             }
-            
-            if (!$site) {
-                throw "Could not find any site collection for URL: $WebUrl"
-            }
-            
-            # Now try to get the specific web
+        }
+        
+        if (!$web) {
+            throw "Could not find web with URL: $WebUrl"
+        }
+        
+        # Get the list with multiple approaches
+        Write-Host "Looking for list: $ListName" -ForegroundColor Gray
+        
+        $list = $null
+        
+        # Try exact title match first
+        try {
+            $list = $web.Lists[$ListName]
+        } catch {}
+        
+        # Try TryGetList method
+        if (!$list) {
             try {
-                $web = $site.OpenWeb($WebUrl.Replace($site.Url, "").TrimStart('/'))
-            } catch {
-                $web = $site.OpenWeb()
+                $list = $web.Lists.TryGetList($ListName)
+            } catch {}
+        }
+        
+        # Try searching by title
+        if (!$list) {
+            try {
+                $list = $web.Lists | Where-Object { $_.Title -eq $ListName }
+            } catch {}
+        }
+        
+        # Try partial match
+        if (!$list) {
+            try {
+                $list = $web.Lists | Where-Object { $_.Title -like "*$ListName*" }
+            } catch {}
+        }
+        
+        if (!$list) {
+            Write-Host "Available lists in this web:" -ForegroundColor Yellow
+            foreach ($availableList in $web.Lists) {
+                Write-Host "  - $($availableList.Title) ($($availableList.ItemCount) items)" -ForegroundColor Gray
             }
-        }
-        Write-Host "Connected to web: $($web.Title)" -ForegroundColor Green
-        
-        # Get the list
-        $list = $web.Lists.TryGetList($ListName)
-        if (!$list) {
-            # Try by display name
-            $list = $web.Lists | Where-Object { $_.Title -eq $ListName }
-        }
-        
-        if (!$list) {
             throw "List '$ListName' not found in web '$($web.Title)'"
         }
         
-        Write-Host "Found list: $($list.Title) with $($list.ItemCount) items" -ForegroundColor Green
+        Write-Host "✓ Found list: $($list.Title) with $($list.ItemCount) items" -ForegroundColor Green
         
+        if ($list.ItemCount -eq 0) {
+            Write-Warning "List contains no items"
+            return @()
+        }
+        
+        # Get list items with error handling
         $formData = @()
         $itemCount = 0
         
-        # Get all items
-        foreach ($item in $list.Items) {
-            $itemCount++
-            $itemId = $item.ID
+        try {
+            # Use SPQuery for better performance with large lists
+            $query = New-Object Microsoft.SharePoint.SPQuery
+            $query.ViewAttributes = "Scope='Recursive'"
+            $query.RowLimit = 2000
             
-            # Clean the title for use in filename
-            $title = "NoTitle"
-            if ($item["Title"] -and $item["Title"].ToString().Trim() -ne "") {
-                $title = $item["Title"].ToString().Trim() -replace '[\\/:*?"<>|]', '_'
-                # Limit title length for filename
-                if ($title.Length -gt 50) {
-                    $title = $title.Substring(0, 47) + "..."
+            do {
+                $items = $list.GetItems($query)
+                
+                foreach ($item in $items) {
+                    $itemCount++
+                    $itemId = $item.ID
+                    
+                    # Clean the title for filename
+                    $title = "NoTitle"
+                    if ($item["Title"] -and $item["Title"].ToString().Trim() -ne "") {
+                        $title = $item["Title"].ToString().Trim() -replace '[\\/:*?"<>|]', '_'
+                        if ($title.Length -gt 50) {
+                            $title = $title.Substring(0, 47) + "..."
+                        }
+                    } else {
+                        $title = "Item$itemId"
+                    }
+                    
+                    # Construct Nintex form URLs with multiple patterns
+                    $webUrl = $web.Url
+                    $listUrl = $list.RootFolder.ServerRelativeUrl
+                    
+                    $possibleUrls = @(
+                        "$webUrl/Lists/$($list.RootFolder.Name)/Item/displayifs.aspx?ID=$itemId",
+                        "$webUrl$listUrl/Item/displayifs.aspx?ID=$itemId",
+                        "$webUrl/Lists/$($list.RootFolder.Name)/DispForm.aspx?ID=$itemId",
+                        "$webUrl$listUrl/DispForm.aspx?ID=$itemId",
+                        "$webUrl/_layouts/15/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId",
+                        "$webUrl/_layouts/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId"
+                    )
+                    
+                    $itemData = [PSCustomObject]@{
+                        Id = $itemId
+                        Title = $title
+                        PrimaryUrl = $possibleUrls[0]
+                        AlternativeUrls = $possibleUrls[1..5]
+                        Created = $item["Created"]
+                        Modified = $item["Modified"]
+                        ListName = $list.Title
+                    }
+                    
+                    $formData += $itemData
+                    
+                    if ($itemCount % 100 -eq 0) {
+                        Write-Host "  Processed $itemCount items..." -ForegroundColor Gray
+                    }
                 }
-            }
+                
+                $query.ListItemCollectionPosition = $items.ListItemCollectionPosition
+                
+            } while ($query.ListItemCollectionPosition -ne $null)
             
-            # Construct potential Nintex form URLs
-            $webUrl = $web.Url
-            $possibleUrls = @(
-                "$webUrl/Lists/$($list.RootFolder.Name)/Item/displayifs.aspx?ID=$itemId",
-                "$webUrl/Lists/$($list.RootFolder.Name)/DispForm.aspx?ID=$itemId",
-                "$webUrl/_layouts/15/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId",
-                "$webUrl/_layouts/listform.aspx?PageType=4&ListId={$($list.ID)}&ID=$itemId"
-            )
-            
-            # Use the first URL pattern as default (adjust if needed)
-            $formUrl = $possibleUrls[0]
-            
-            $itemData = [PSCustomObject]@{
-                Id = $itemId
-                Title = $title
-                Url = $formUrl
-                Created = $item["Created"]
-                Modified = $item["Modified"]
-                ListName = $list.Title
-            }
-            
-            $formData += $itemData
-            
-            # Progress indicator for large lists
-            if ($itemCount % 100 -eq 0) {
-                Write-Host "Processed $itemCount items..." -ForegroundColor Gray
-            }
+        } catch {
+            Write-Error "Error retrieving list items: $($_.Exception.Message)"
+            return @()
         }
         
-        Write-Host "Retrieved $($formData.Count) form items" -ForegroundColor Green
-        
-        # Dispose SharePoint objects
-        $web.Dispose()
-        $site.Dispose()
+        Write-Host "✓ Retrieved $($formData.Count) form items" -ForegroundColor Green
         
         return $formData
         
-    }
-    catch {
+    } catch {
         Write-Error "Failed to get SharePoint list items: $($_.Exception.Message)"
-        
-        # Cleanup on error
-        if ($web) { $web.Dispose() }
-        if ($site) { $site.Dispose() }
-        
+        Write-Host "Stack trace:" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
         return @()
+    } finally {
+        # Clean up objects but don't dispose if we're returning them
+        if ($web -and !$site) {
+            # Only dispose if we got the web directly, not via site collection
+            try { $web.Dispose() } catch {}
+        }
     }
 }
 
-# Function to discover SharePoint structure
-function Find-SharePointStructure {
-    Write-Host "=== SharePoint Structure Discovery ===" -ForegroundColor Cyan
-    
-    # Get all site collections
-    $siteCollections = Get-SPSite -Limit All
-    Write-Host "`nFound Site Collections:" -ForegroundColor Yellow
-    
-    foreach ($siteCollection in $siteCollections) {
-        Write-Host "  Site Collection: $($siteCollection.Url)" -ForegroundColor White
-        
-        # Get all webs in this site collection
-        foreach ($web in $siteCollection.AllWebs) {
-            if ($web.Url -like "*safalo*" -or $web.Url -like "*Connor*") {
-                Write-Host "    Web: $($web.Url)" -ForegroundColor Green
-                
-                # Look for lists that might contain forms
-                foreach ($list in $web.Lists) {
-                    if ($list.Title -like "*Onboard*" -or $list.Title -like "*Form*" -or $list.ItemCount -gt 0) {
-                        Write-Host "      List: '$($list.Title)' ($($list.ItemCount) items)" -ForegroundColor Cyan
-                    }
-                }
-            }
-            $web.Dispose()
-        }
-    }
-    
-    Write-Host "`n" -ForegroundColor White
-}
-function Test-FormUrl {
-    param([string]$Url)
+# Function to test form URL accessibility
+function Test-FormUrlAccessible {
+    param([string]$Url, [int]$TimeoutSeconds = 10)
     
     try {
-        $response = Invoke-WebRequest -Uri $Url -Method Head -UseDefaultCredentials -TimeoutSec 10
-        return $response.StatusCode -eq 200
-    }
-    catch {
+        $request = [System.Net.WebRequest]::Create($Url)
+        $request.Method = "HEAD"
+        $request.Timeout = $TimeoutSeconds * 1000
+        $request.UseDefaultCredentials = $true
+        
+        $response = $request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+        $response.Close()
+        
+        return $statusCode -eq 200
+    } catch {
         return $false
     }
 }
 
 # Main execution
-Write-Host "=== Nintex Forms PDF Export ===" -ForegroundColor Cyan
+Write-Host "=== Robust Nintex Forms PDF Export ===" -ForegroundColor Cyan
 Write-Host "SharePoint Web: $WebUrl" -ForegroundColor White
 Write-Host "List Name: $ListName" -ForegroundColor White
 Write-Host "Output Path: $OutputPath" -ForegroundColor White
 Write-Host "Export Method: $Method" -ForegroundColor White
-Write-Host "Batch Size: $BatchSize" -ForegroundColor White
 
-# Validate Chrome/wkhtmltopdf availability
-switch ($Method.ToLower()) {
-    "chrome" {
-        if (!(Test-Path $ChromePath)) {
-            Write-Error "Chrome not found at: $ChromePath"
-            Write-Host "Please install Chrome or specify correct path with -ChromePath parameter"
-            exit 1
-        }
-        Write-Host "Using Chrome at: $ChromePath" -ForegroundColor Green
-    }
-    "wkhtmltopdf" {
-        if (!(Test-Path $wkhtmltopdfPath)) {
-            Write-Error "wkhtmltopdf not found at: $wkhtmltopdfPath"
-            Write-Host "Please install wkhtmltopdf or specify correct path with -wkhtmltopdfPath parameter"
-            exit 1
-        }
-        Write-Host "Using wkhtmltopdf at: $wkhtmltopdfPath" -ForegroundColor Green
-    }
-    default {
-        Write-Error "Invalid method: $Method. Use 'Chrome' or 'wkhtmltopdf'"
-        exit 1
-    }
+# Validate Chrome
+if (!(Test-Path $ChromePath)) {
+    Write-Error "Chrome not found at: $ChromePath"
+    Write-Host "Please install Chrome or specify correct path with -ChromePath parameter"
+    exit 1
 }
+Write-Host "✓ Chrome found at: $ChromePath" -ForegroundColor Green
 
 # Create output directory
 if (!(Test-Path -Path $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-    Write-Host "Created output directory: $OutputPath" -ForegroundColor Green
+    Write-Host "✓ Created output directory: $OutputPath" -ForegroundColor Green
 }
 
-# Get all form items
+# Get all form items using robust method
 Write-Host "`nRetrieving list items..." -ForegroundColor Yellow
-$forms = Get-SharePointListItems -WebUrl $WebUrl -ListName $ListName
+$forms = Get-SharePointListItemsRobust -WebUrl $WebUrl -ListName $ListName
 
 if ($forms.Count -eq 0) {
     Write-Host "No forms found. Exiting." -ForegroundColor Red
@@ -340,71 +300,79 @@ if ($forms.Count -eq 0) {
 
 Write-Host "Found $($forms.Count) forms to export`n" -ForegroundColor Green
 
-# Test first form URL to validate URL pattern
-Write-Host "Testing first form URL..." -ForegroundColor Yellow
-$testForm = $forms[0]
-Write-Host "Test URL: $($testForm.Url)" -ForegroundColor Gray
+# Test first few form URLs to find the right pattern
+Write-Host "Testing form URL patterns..." -ForegroundColor Yellow
+$workingUrlPattern = $null
+$testForms = $forms | Select-Object -First 3
 
-if (Test-FormUrl -Url $testForm.Url) {
-    Write-Host "✓ URL pattern appears correct" -ForegroundColor Green
-} else {
-    Write-Host "⚠ URL pattern may need adjustment" -ForegroundColor Yellow
-    Write-Host "If exports fail, you may need to modify the URL pattern in the script" -ForegroundColor Yellow
+foreach ($testForm in $testForms) {
+    Write-Host "Testing Item ID $($testForm.Id):" -ForegroundColor Gray
+    
+    # Test primary URL
+    Write-Host "  Testing: $($testForm.PrimaryUrl)" -ForegroundColor Gray
+    if (Test-FormUrlAccessible -Url $testForm.PrimaryUrl) {
+        Write-Host "  ✓ Primary URL works!" -ForegroundColor Green
+        $workingUrlPattern = "Primary"
+        break
+    }
+    
+    # Test alternative URLs
+    for ($i = 0; $i -lt $testForm.AlternativeUrls.Count; $i++) {
+        $altUrl = $testForm.AlternativeUrls[$i]
+        Write-Host "  Testing: $altUrl" -ForegroundColor Gray
+        if (Test-FormUrlAccessible -Url $altUrl) {
+            Write-Host "  ✓ Alternative URL #$($i+1) works!" -ForegroundColor Green
+            $workingUrlPattern = "Alternative$($i+1)"
+            break
+        }
+    }
+    
+    if ($workingUrlPattern) { break }
 }
 
-# Process forms in batches
+if (!$workingUrlPattern) {
+    Write-Warning "Could not find accessible form URLs. Proceeding with primary URL pattern..."
+    $workingUrlPattern = "Primary"
+}
+
+# Process forms
 $successCount = 0
 $failureCount = 0
-$processedCount = 0
 
-for ($i = 0; $i -lt $forms.Count; $i += $BatchSize) {
-    $batch = $forms[$i..([Math]::Min($i + $BatchSize - 1, $forms.Count - 1))]
-    $batchNumber = [Math]::Floor($i / $BatchSize) + 1
-    $totalBatches = [Math]::Ceiling($forms.Count / $BatchSize)
+foreach ($form in $forms) {
+    $processedCount = $successCount + $failureCount + 1
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $fileName = "NintexForm_ID$($form.Id)_$($form.Title)_$timestamp.pdf"
+    $outputFile = Join-Path -Path $OutputPath -ChildPath $fileName
     
-    Write-Host "`nProcessing batch $batchNumber of $totalBatches ($($batch.Count) items)..." -ForegroundColor Cyan
-    
-    foreach ($form in $batch) {
-        $processedCount++
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $fileName = "NintexForm_ID$($form.Id)_$($form.Title)_$timestamp.pdf"
-        $outputFile = Join-Path -Path $OutputPath -ChildPath $fileName
-        
-        Write-Host "[$processedCount/$($forms.Count)] Processing ID $($form.Id): $($form.Title)" -ForegroundColor White
-        
-        $success = $false
-        
-        switch ($Method.ToLower()) {
-            "chrome" {
-                $success = Export-WithChrome -Url $form.Url -OutputFile $outputFile -ChromePath $ChromePath
-            }
-            "wkhtmltopdf" {
-                $success = Export-WithWkhtmltopdf -Url $form.Url -OutputFile $outputFile -WkhtmltopdfPath $wkhtmltopdfPath
-            }
-        }
-        
-        if ($success) {
-            $successCount++
-            $fileSize = [Math]::Round((Get-Item $outputFile).Length / 1KB, 1)
-            Write-Host "  ✓ Success ($fileSize KB)" -ForegroundColor Green
-        } else {
-            $failureCount++
-            Write-Host "  ✗ Failed" -ForegroundColor Red
-            
-            # Log failed URL for troubleshooting
-            "$($form.Url)" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
-        }
-        
-        # Overall progress
-        $percentComplete = [Math]::Round(($processedCount / $forms.Count) * 100, 1)
-        Write-Progress -Activity "Exporting Nintex Forms" -Status "$processedCount of $($forms.Count) processed" -PercentComplete $percentComplete
+    # Select URL based on working pattern
+    $formUrl = switch ($workingUrlPattern) {
+        "Primary" { $form.PrimaryUrl }
+        "Alternative1" { $form.AlternativeUrls[0] }
+        "Alternative2" { $form.AlternativeUrls[1] }
+        "Alternative3" { $form.AlternativeUrls[2] }
+        "Alternative4" { $form.AlternativeUrls[3] }
+        "Alternative5" { $form.AlternativeUrls[4] }
+        default { $form.PrimaryUrl }
     }
     
-    # Small delay between batches to prevent overwhelming the system
-    if ($i + $BatchSize -lt $forms.Count) {
-        Write-Host "Pausing between batches..." -ForegroundColor Gray
-        Start-Sleep -Seconds 2
+    Write-Host "[$processedCount/$($forms.Count)] Processing ID $($form.Id): $($form.Title)" -ForegroundColor White
+    Write-Host "  URL: $formUrl" -ForegroundColor Gray
+    
+    $success = Export-WithChrome -Url $formUrl -OutputFile $outputFile -ChromePath $ChromePath
+    
+    if ($success) {
+        $successCount++
+        $fileSize = [Math]::Round((Get-Item $outputFile).Length / 1KB, 1)
+        Write-Host "  ✓ Success ($fileSize KB)" -ForegroundColor Green
+    } else {
+        $failureCount++
+        Write-Host "  ✗ Failed" -ForegroundColor Red
+        "$formUrl" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
     }
+    
+    $percentComplete = [Math]::Round(($processedCount / $forms.Count) * 100, 1)
+    Write-Progress -Activity "Exporting Nintex Forms" -Status "$processedCount of $($forms.Count) processed" -PercentComplete $percentComplete
 }
 
 # Final summary
@@ -416,27 +384,5 @@ Write-Host "Successful exports: $successCount" -ForegroundColor Green
 Write-Host "Failed exports: $failureCount" -ForegroundColor Red
 Write-Host "Success rate: $([Math]::Round(($successCount / $forms.Count) * 100, 1))%" -ForegroundColor White
 Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
-
-# Create detailed log
-$logData = @{
-    ExportDate = Get-Date
-    WebUrl = $WebUrl
-    ListName = $ListName
-    ExportMethod = $Method
-    TotalForms = $forms.Count
-    SuccessfulExports = $successCount
-    FailedExports = $failureCount
-    OutputPath = $OutputPath
-    BatchSize = $BatchSize
-}
-
-$logPath = Join-Path -Path $OutputPath -ChildPath "ExportLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-$logData | ConvertTo-Json -Depth 2 | Out-File -FilePath $logPath -Encoding UTF8
-
-Write-Host "`nDetailed log saved: $logPath" -ForegroundColor Cyan
-
-if ($failureCount -gt 0) {
-    Write-Host "Failed URLs logged to: $OutputPath\FailedURLs.txt" -ForegroundColor Yellow
-}
 
 Write-Host "`nExport completed!" -ForegroundColor Green
