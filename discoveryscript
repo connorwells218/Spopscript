@@ -1,0 +1,96 @@
+# SharePoint Site Discovery Script
+# Run this first to find your correct site and list information
+
+# Load SharePoint PowerShell
+Write-Host "Loading SharePoint PowerShell..." -ForegroundColor Yellow
+try {
+    Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop
+    Write-Host "SharePoint PowerShell loaded successfully" -ForegroundColor Green
+}
+catch {
+    Write-Error "Failed to load SharePoint PowerShell. Ensure you're running on a SharePoint server."
+    exit 1
+}
+
+Write-Host "`n=== SharePoint Structure Discovery ===" -ForegroundColor Cyan
+
+# Get all site collections
+Write-Host "`nDiscovering Site Collections..." -ForegroundColor Yellow
+$siteCollections = Get-SPSite -Limit All
+
+$foundTargets = @()
+
+foreach ($siteCollection in $siteCollections) {
+    Write-Host "`nSite Collection: $($siteCollection.Url)" -ForegroundColor White
+    
+    # Get all webs in this site collection
+    foreach ($web in $siteCollection.AllWebs) {
+        # Look for webs that might be yours (containing safalo or connor)
+        if ($web.Url -like "*safalo*" -or $web.Url -like "*Connor*" -or $web.Title -like "*Connor*") {
+            Write-Host "  ✓ Found Web: $($web.Url)" -ForegroundColor Green
+            Write-Host "    Title: $($web.Title)" -ForegroundColor Gray
+            
+            # Look for your OnboardingList
+            foreach ($list in $web.Lists) {
+                if ($list.Title -eq "OnboardingList" -or $list.Title -like "*Onboard*") {
+                    Write-Host "    ✓ Found List: '$($list.Title)' ($($list.ItemCount) items)" -ForegroundColor Cyan
+                    
+                    $targetInfo = @{
+                        WebUrl = $web.Url
+                        WebTitle = $web.Title
+                        ListName = $list.Title
+                        ItemCount = $list.ItemCount
+                        ListId = $list.ID
+                    }
+                    $foundTargets += $targetInfo
+                }
+                
+                # Also show other interesting lists
+                if ($list.ItemCount -gt 0 -and $list.Title -notlike "*Style Library*" -and $list.Title -notlike "*Master Page*") {
+                    Write-Host "    - $($list.Title) ($($list.ItemCount) items)" -ForegroundColor Gray
+                }
+            }
+        }
+        $web.Dispose()
+    }
+}
+
+# Summary of findings
+if ($foundTargets.Count -gt 0) {
+    Write-Host "`n=== TARGETS FOUND ===" -ForegroundColor Green
+    
+    foreach ($target in $foundTargets) {
+        Write-Host "`nTarget #$($foundTargets.IndexOf($target) + 1):" -ForegroundColor Yellow
+        Write-Host "  Web URL: $($target.WebUrl)" -ForegroundColor White
+        Write-Host "  Web Title: $($target.WebTitle)" -ForegroundColor White
+        Write-Host "  List Name: $($target.ListName)" -ForegroundColor White
+        Write-Host "  Item Count: $($target.ItemCount)" -ForegroundColor White
+        
+        Write-Host "`n  Use this command:" -ForegroundColor Cyan
+        Write-Host "  .\NintexServerExport.ps1 -WebUrl `"$($target.WebUrl)`" -ListName `"$($target.ListName)`" -OutputPath `"C:\Exports\NintexForms`"" -ForegroundColor Green
+    }
+} else {
+    Write-Host "`n❌ No OnboardingList found!" -ForegroundColor Red
+    Write-Host "Let's look for ALL lists that might contain forms..." -ForegroundColor Yellow
+    
+    # Broader search
+    foreach ($siteCollection in $siteCollections) {
+        foreach ($web in $siteCollection.AllWebs) {
+            foreach ($list in $web.Lists) {
+                if ($list.ItemCount -gt 0 -and 
+                    $list.BaseType -eq "GenericList" -and
+                    $list.Title -notlike "*Style*" -and
+                    $list.Title -notlike "*Master*" -and
+                    $list.Title -notlike "*Workflow*") {
+                    
+                    Write-Host "`nPossible Target:" -ForegroundColor Yellow
+                    Write-Host "  Web: $($web.Url)" -ForegroundColor White
+                    Write-Host "  List: '$($list.Title)' ($($list.ItemCount) items)" -ForegroundColor White
+                }
+            }
+            $web.Dispose()
+        }
+    }
+}
+
+Write-Host "`n=== Discovery Complete ===" -ForegroundColor Cyan
