@@ -1,0 +1,119 @@
+# Selenium WebDriver + Chrome/Edge drivers
+Install-Package Selenium.WebDriver -ProviderName NuGet -Scope CurrentUser
+Install-Package Selenium.WebDriver.ChromeDriver -ProviderName NuGet -Scope CurrentUser     # (if using Chrome)
+Install-Package Selenium.WebDriver.MSEdgeDriver -ProviderName NuGet -Scope CurrentUser     # (if using Edge)
+
+# PnP.PowerShell to enumerate list items
+Install-Module PnP.PowerShell -Scope CurrentUser
+
+
+
+# ===================== USER SETTINGS =====================
+$SiteUrl        = "https://<tenant>.sharepoint.com/sites/<site>"
+$ListName       = "OnboardingList"                          # Display name of the list
+$OutputFolder   = "C:\FormPDFs\OnboardingList"              # Where PDFs will be saved
+$UseEdge        = $true                                     # $true = Edge, $false = Chrome
+$BrowserProfile = "C:\SPOProfile"                           # Reused to keep SPO login cookies
+$Headless       = $true                                     # Set $false for the very first run to sign in
+$PageLoadWaitMs = 6000                                      # Adjust if your form has heavy rules/JS
+# Optional: name your PDFs with list fields
+$PdfNameFields  = @("Title")                                # Add more (e.g., "Created") if you want
+# =========================================================
+
+Import-Module PnP.PowerShell
+
+# Ensure output folder exists
+New-Item -ItemType Directory -Force -Path $OutputFolder | Out-Null
+
+# 1) Get items + the Display Form URL pattern
+Connect-PnPOnline -Url $SiteUrl -Interactive
+$web  = Get-PnPWeb
+$list = Get-PnPList -Identity $ListName
+
+# $list.DefaultDisplayFormUrl is server-relative (e.g., /sites/site/Lists/OnboardingList/DispForm.aspx)
+$dispRel = $list.DefaultDisplayFormUrl
+$siteBase = $web.Url.TrimEnd('/')
+
+# 2) Setup Selenium (Edge/Chrome) with CDP (DevTools) enabled
+Add-Type -AssemblyName "System.Drawing" | Out-Null
+
+if ($UseEdge) {
+    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver.MSEdgeDriver -ProviderName NuGet).Source -Parent) "lib\net48\msedgedriver.exe") -ErrorAction SilentlyContinue | Out-Null
+    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver -ProviderName NuGet).Source -Parent) "lib\net48\WebDriver.dll") | Out-Null
+    $edgeOpts = New-Object OpenQA.Selenium.Edge.EdgeOptions
+    $edgeOpts.AddArgument("--user-data-dir=$BrowserProfile")
+    if ($Headless) { $edgeOpts.AddArgument("--headless=new"); $edgeOpts.AddArgument("--disable-gpu") }
+    $edgeOpts.AddAdditionalOption("ms:edgeOptions", @{args=@()}) | Out-Null
+    $driver = New-Object OpenQA.Selenium.Edge.EdgeDriver($edgeOpts)
+} else {
+    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver.ChromeDriver -ProviderName NuGet).Source -Parent) "lib\net48\chromedriver.exe") -ErrorAction SilentlyContinue | Out-Null
+    Add-Type -Path (Join-Path (Split-Path (Get-Package Selenium.WebDriver -ProviderName NuGet).Source -Parent) "lib\net48\WebDriver.dll") | Out-Null
+    $chromeOpts = New-Object OpenQA.Selenium.Chrome.ChromeOptions
+    $chromeOpts.AddArgument("--user-data-dir=$BrowserProfile")
+    if ($Headless) { $chromeOpts.AddArgument("--headless=new"); $chromeOpts.AddArgument("--disable-gpu") }
+    $driver = New-Object OpenQA.Selenium.Chrome.ChromeDriver($chromeOpts)
+}
+
+# Small helper: call Chrome/Edge DevTools "Page.printToPDF"
+function Invoke-PrintToPdf {
+    param(
+        [OpenQA.Selenium.IWebDriver] $Driver
+    )
+    $params = @{
+        landscape        = $false
+        printBackground  = $true
+        preferCSSPageSize= $true
+        scale            = 1.0
+        paperWidth       = 8.27   # A4; use 8.5/11 for Letter
+        paperHeight      = 11.69
+        marginTop        = 0.4
+        marginBottom     = 0.4
+        marginLeft       = 0.4
+        marginRight      = 0.4
+    }
+    # ExecuteCdpCommand returns a dict with "data" = base64 PDF
+    $res = $Driver.ExecuteCdpCommand("Page.printToPDF", $params)
+    return [System.Convert]::FromBase64String($res["data"])
+}
+
+# 3) Enumerate items and print each form to PDF
+$items = Get-PnPListItem -List $ListName -PageSize 5000 -ScriptBlock { Param($items) $items }
+$idx = 0
+foreach ($it in $items) {
+    $idx++
+    $id = $it.Id
+
+    # Build URL to the Display Form; Nintex hooks this and renders the Nintex form.
+    $displayUrl = "$siteBase$dispRel?ID=$id"
+
+    # Build a nice file name: e.g., "123 - Test.pdf"
+    $nameParts = @()
+    foreach ($f in $PdfNameFields) {
+        if ($it.FieldValues.ContainsKey($f) -and $it[$f]) { $nameParts += ($it[$f].ToString().Trim()) }
+    }
+    $safeName = ($nameParts -join " - ")
+    if ([string]::IsNullOrWhiteSpace($safeName)) { $safeName = "Item" }
+    $fileName = "{0:D5} - ID{1} - {2}.pdf" -f $idx,$id,($safeName -replace '[\\/:*?"<>|]','_')
+    $outPath  = Join-Path $OutputFolder $fileName
+
+    Write-Host ("[{0}/{1}] {2}" -f $idx,$items.Count,$displayUrl)
+
+    try {
+        $driver.Navigate().GoToUrl($displayUrl)
+
+        # give the Nintex form time to render client-side (rules, repeating sections, etc.)
+        Start-Sleep -Milliseconds $PageLoadWaitMs
+
+        # If your form shows a watermark or needs a specific CSS for print,
+        # you could inject JS here to tweak the DOM before printing.
+
+        $pdfBytes = Invoke-PrintToPdf -Driver $driver
+        [IO.File]::WriteAllBytes($outPath, $pdfBytes)
+    }
+    catch {
+        Write-Warning "Failed to export ID=$id : $($_.Exception.Message)"
+    }
+}
+
+$driver.Quit()
+Write-Host "Done. PDFs in: $OutputFolder"
