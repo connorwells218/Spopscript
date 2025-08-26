@@ -53,12 +53,25 @@ catch {
     exit 1
 }
 
-# Define URL patterns to try
+# Define URL patterns to try - focusing on getting actual form content
 $urlPatterns = @(
-    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}",
+    # Try the working /hr/ URL from your screenshots
+    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&Source=",
     "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}",
+    
+    # Try Nintex-specific URLs
+    "https://sp.safalo.com/hr/Lists/$ListName/Item/displayifs.aspx?ID={0}",
     "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    "https://sp.safalo.com/hr/Lists/$ListName/Item/displayifs.aspx?ID={0}"
+    
+    # Try without navigation/chrome
+    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&IsDlg=1",
+    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}&IsDlg=1",
+    
+    # Try mobile view (often cleaner)
+    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&mobile=1",
+    
+    # Try print view
+    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&PageView=Shared&InitialTabId=Ribbon%2ERead"
 )
 
 # Test URL patterns with authentication
