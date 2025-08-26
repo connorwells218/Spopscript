@@ -27,3 +27,7 @@ https://sp.safalo.com/hr/Lists/OnboardingList/DispForm.aspx?ID=3
 
 
 https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/?cs=1873324239&form=MA13LH#downloads
+
+
+cd C:\Users\administrator.SAFALO\Desktop\Script
+powershell -NoProfile -ExecutionPolicy Bypass -File .\ExportForms.ps1
