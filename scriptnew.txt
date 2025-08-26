@@ -1,178 +1,188 @@
-# Chrome Profile Export Script
-# Uses your existing Chrome profile to maintain authentication
+# Windows Authentication Solution for SharePoint
+# Handles domain authentication properly
 
-# Configuration
-$webUrl = "https://sp.safalo.com/hr"
-$listName = "OnboardingList"
-$outputPath = "C:\Exports\NintexForms"
-$startID = 1
-$endID = 10
-
-Write-Host "Chrome Profile Export Script" -ForegroundColor Green
-Write-Host "Web: $webUrl"
-Write-Host "List: $listName"
-Write-Host "Output: $outputPath"
-Write-Host "IDs: $startID to $endID"
-Write-Host ""
-
-# Create output directory
-if (!(Test-Path $outputPath)) {
-    New-Item -ItemType Directory -Path $outputPath -Force
-    Write-Host "Created directory: $outputPath"
-}
-
-# Find Chrome
-$chrome = ""
-if (Test-Path "C:\Program Files\Google\Chrome\Application\chrome.exe") {
-    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-}
-elseif (Test-Path "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe") {
-    $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-}
-else {
-    Write-Host "Chrome not found!" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Using Chrome: $chrome"
-
-# Find Chrome profile directory
-$possibleProfiles = @(
-    "$env:LOCALAPPDATA\Google\Chrome\User Data",
-    "$env:USERPROFILE\AppData\Local\Google\Chrome\User Data",
-    "$env:APPDATA\..\Local\Google\Chrome\User Data"
+param(
+    [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
+    [string]$ListName = "OnboardingList",
+    [string]$OutputPath = "C:\Exports\NintexForms",
+    [int]$StartID = 1,
+    [int]$EndID = 10
 )
 
-$profilePath = ""
-foreach ($path in $possibleProfiles) {
-    if (Test-Path "$path\Default") {
-        $profilePath = $path
-        Write-Host "Found Chrome profile: $profilePath"
-        break
+Write-Host "Windows Authentication Solution" -ForegroundColor Green
+Write-Host "Domain: SAFALO" -ForegroundColor Gray
+Write-Host "Web: $WebUrl"
+Write-Host "List: $ListName"
+
+# Create output directory
+if (!(Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath -Force
+}
+
+# Method 1: Use current Windows credentials (if running as domain user)
+function Test-CurrentCredentials {
+    param([string]$TestUrl)
+    
+    try {
+        Write-Host "Testing with current Windows credentials..." -ForegroundColor Yellow
+        $response = Invoke-WebRequest -Uri $TestUrl -UseDefaultCredentials -UseBasicParsing -TimeoutSec 10
+        Write-Host "Current credentials work!" -ForegroundColor Green
+        return $true
+    }
+    catch {
+        Write-Host "Current credentials failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
     }
 }
 
-if ($profilePath -eq "") {
-    Write-Host "Chrome profile not found. Using default method." -ForegroundColor Yellow
-    $profilePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+# Method 2: Use explicit domain credentials
+function Test-DomainCredentials {
+    param([string]$TestUrl)
+    
+    try {
+        Write-Host "Enter your SAFALO domain credentials" -ForegroundColor Yellow
+        Write-Host "Format: SAFALO\username or username@safalo.com" -ForegroundColor Gray
+        
+        $credential = Get-Credential -Message "Enter SAFALO domain credentials (SAFALO\username)"
+        
+        $response = Invoke-WebRequest -Uri $TestUrl -Credential $credential -UseBasicParsing -TimeoutSec 10
+        Write-Host "Domain credentials work!" -ForegroundColor Green
+        return $credential
+    }
+    catch {
+        Write-Host "Domain credentials failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
 }
 
-Write-Host ""
-Write-Host "IMPORTANT: Make sure you are logged into SharePoint in Chrome first!" -ForegroundColor Yellow
-Write-Host "1. Open Chrome and go to: $webUrl"
-Write-Host "2. Login with your credentials"
-Write-Host "3. Test that you can view a form manually"
-Write-Host "4. Keep Chrome open during export"
-Write-Host ""
-
-$continue = Read-Host "Are you logged into SharePoint in Chrome? (y/n)"
-if ($continue -ne "y" -and $continue -ne "Y") {
-    Write-Host "Please login to SharePoint in Chrome first, then run this script again."
-    exit 0
-}
-
-Write-Host ""
-Write-Host "Starting export using your Chrome profile..." -ForegroundColor Green
-Write-Host ""
-
-$successCount = 0
-$failedCount = 0
-
-# Export each form
-for ($id = $startID; $id -le $endID; $id++) {
-    $url = "$webUrl/Lists/$listName/DispForm.aspx?ID=$id"
-    $pdfFile = "$outputPath\NintexForm_ID$id.pdf"
-    
-    Write-Host "Processing ID $id..." -ForegroundColor White
-    Write-Host "  URL: $url" -ForegroundColor Gray
-    
-    # Chrome arguments using your profile
-    $chromeArgs = @(
-        "--headless",
-        "--disable-gpu",
-        "--no-sandbox", 
-        "--disable-dev-shm-usage",
-        "--user-data-dir=`"$profilePath`"",
-        "--profile-directory=Default",
-        "--disable-extensions",
-        "--disable-plugins",
-        "--virtual-time-budget=12000",
-        "--run-all-compositor-stages-before-draw",
-        "--print-to-pdf=`"$pdfFile`"",
-        "`"$url`""
+# Method 3: Use Windows integrated authentication with specific user
+function Invoke-AsUser {
+    param(
+        [string]$Username,
+        [string]$Password,
+        [string]$Domain = "SAFALO",
+        [scriptblock]$ScriptBlock
     )
     
     try {
-        # Start Chrome with your profile
-        $process = Start-Process -FilePath $chrome -ArgumentList $chromeArgs -Wait -NoNewWindow -PassThru
+        $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential("$Domain\$Username", $securePassword)
         
-        # Wait for PDF generation
-        Start-Sleep -Seconds 3
+        # This approach starts a new process with the specified credentials
+        $job = Start-Job -ScriptBlock $ScriptBlock -Credential $credential
+        $result = Receive-Job -Job $job -Wait
+        Remove-Job -Job $job
+        
+        return $result
+    }
+    catch {
+        Write-Host "User impersonation failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+# Method 4: Download content with proper Windows auth
+function Get-FormContent {
+    param([string]$FormUrl, [object]$Credentials = $null)
+    
+    try {
+        if ($Credentials) {
+            $response = Invoke-WebRequest -Uri $FormUrl -Credential $Credentials -UseBasicParsing
+        } else {
+            $response = Invoke-WebRequest -Uri $FormUrl -UseDefaultCredentials -UseBasicParsing
+        }
+        
+        return $response.Content
+    }
+    catch {
+        Write-Host "Failed to get form content: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+# Test authentication methods
+Write-Host "`nTesting authentication methods..." -ForegroundColor Cyan
+$testUrl = $WebUrl
+
+$workingCredentials = $null
+
+# Try current Windows credentials first
+if (Test-CurrentCredentials -TestUrl $testUrl) {
+    $workingCredentials = "current"
+    Write-Host "Will use current Windows credentials" -ForegroundColor Green
+} else {
+    # Try domain credentials
+    $domainCreds = Test-DomainCredentials -TestUrl $testUrl
+    if ($domainCreds) {
+        $workingCredentials = $domainCreds
+        Write-Host "Will use provided domain credentials" -ForegroundColor Green
+    } else {
+        Write-Host "Authentication failed with both methods" -ForegroundColor Red
+        Write-Host "`nPossible solutions:" -ForegroundColor Yellow
+        Write-Host "1. Run PowerShell as administrator" -ForegroundColor White
+        Write-Host "2. Run as a user with SharePoint access (runas /user:SAFALO\username powershell)" -ForegroundColor White
+        Write-Host "3. Add your computer to the SAFALO domain" -ForegroundColor White
+        Write-Host "4. Use VPN if this is an internal site" -ForegroundColor White
+        exit 1
+    }
+}
+
+# Process forms
+$successCount = 0
+$failedCount = 0
+
+Write-Host "`nStarting form export..." -ForegroundColor Green
+
+for ($id = $StartID; $id -le $EndID; $id++) {
+    $formUrl = "$WebUrl/Lists/$ListName/DispForm.aspx?ID=$id"
+    $pdfFile = "$OutputPath\NintexForm_ID$id.pdf"
+    
+    Write-Host "`nProcessing ID $id..." -ForegroundColor White
+    Write-Host "URL: $formUrl" -ForegroundColor Gray
+    
+    # Get form content
+    if ($workingCredentials -eq "current") {
+        $htmlContent = Get-FormContent -FormUrl $formUrl
+    } else {
+        $htmlContent = Get-FormContent -FormUrl $formUrl -Credentials $workingCredentials
+    }
+    
+    if ($htmlContent) {
+        # Save to temp HTML file
+        $tempHtml = "$env:TEMP\form_$id.html"
+        $htmlContent | Out-File -FilePath $tempHtml -Encoding UTF8
+        
+        # Convert to PDF using Chrome (no auth needed for local files)
+        $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+        if (Test-Path $chrome) {
+            $fileUri = "file:///$($tempHtml.Replace('\', '/'))"
+            & $chrome --headless --disable-gpu --no-sandbox --print-to-pdf="$pdfFile" "$fileUri" 2>$null
+            Start-Sleep -Seconds 3
+        }
+        
+        # Cleanup temp file
+        Remove-Item $tempHtml -Force -ErrorAction SilentlyContinue
         
         if (Test-Path $pdfFile) {
             $fileSize = (Get-Item $pdfFile).Length
-            if ($fileSize -gt 3000) {
-                Write-Host "  SUCCESS - PDF created ($fileSize bytes)" -ForegroundColor Green
-                $successCount++
-            }
-            elseif ($fileSize -gt 500) {
-                Write-Host "  WARNING - Small PDF ($fileSize bytes), may be error page" -ForegroundColor Yellow
-                # Keep the file but rename it for inspection
-                $errorFile = $pdfFile -replace "\.pdf$", "_small.pdf"
-                Move-Item $pdfFile $errorFile
-                Write-Host "  Renamed to: $(Split-Path $errorFile -Leaf)" -ForegroundColor Gray
-                $failedCount++
-            }
-            else {
-                Write-Host "  FAILED - PDF too small ($fileSize bytes)" -ForegroundColor Red
-                Remove-Item $pdfFile -Force -ErrorAction SilentlyContinue
-                $failedCount++
-            }
-        }
-        else {
-            Write-Host "  FAILED - No PDF created" -ForegroundColor Red
+            Write-Host "SUCCESS - $fileSize bytes" -ForegroundColor Green
+            $successCount++
+        } else {
+            Write-Host "FAILED - PDF conversion failed" -ForegroundColor Red
             $failedCount++
         }
-    }
-    catch {
-        Write-Host "  ERROR - $($_.Exception.Message)" -ForegroundColor Red
+    } else {
+        Write-Host "FAILED - Could not download form" -ForegroundColor Red
         $failedCount++
     }
     
-    # Small delay between requests
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
 }
 
 # Summary
-Write-Host ""
-Write-Host "=== EXPORT SUMMARY ===" -ForegroundColor Cyan
-Write-Host "Total IDs processed: $($successCount + $failedCount)" -ForegroundColor White
-Write-Host "Successful exports: $successCount" -ForegroundColor Green
-Write-Host "Failed exports: $failedCount" -ForegroundColor Red
+Write-Host "`n=== RESULTS ===" -ForegroundColor Cyan
+Write-Host "Successful: $successCount" -ForegroundColor Green
+Write-Host "Failed: $failedCount" -ForegroundColor Red
+Write-Host "Output: $OutputPath" -ForegroundColor Cyan
 
-if ($successCount + $failedCount -gt 0) {
-    $successRate = [Math]::Round(($successCount / ($successCount + $failedCount)) * 100, 1)
-    Write-Host "Success rate: $successRate%" -ForegroundColor White
-}
-
-Write-Host "Output directory: $outputPath" -ForegroundColor Cyan
-
-# Additional troubleshooting info
-if ($failedCount -gt 0) {
-    Write-Host ""
-    Write-Host "If exports failed, try these steps:" -ForegroundColor Yellow
-    Write-Host "1. Verify you can manually open the URLs in Chrome while logged in"
-    Write-Host "2. Check if Chrome is asking for credentials in the regular browser"
-    Write-Host "3. Try closing all Chrome windows and logging in again"
-    Write-Host "4. Some IDs may not exist - check which IDs actually have forms"
-}
-
-# Show first few URLs for manual testing
-Write-Host ""
-Write-Host "Test URLs manually in Chrome:" -ForegroundColor Cyan
-for ($i = $startID; $i -le [Math]::Min($startID + 2, $endID); $i++) {
-    Write-Host "  $webUrl/Lists/$listName/DispForm.aspx?ID=$i" -ForegroundColor Gray
-}
-
-Write-Host ""
-Write-Host "Export completed!" -ForegroundColor Green
+Write-Host "`nDone!" -ForegroundColor Green
