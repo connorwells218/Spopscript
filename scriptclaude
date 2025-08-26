@@ -1,4 +1,4 @@
-# Complete Nintex Forms Export Script with Authentication
+# Payload-Based PDF Export - Replicates Nintex's Print to PDF method exactly
 param(
     [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
     [string]$ListName = "OnboardingList",
@@ -7,306 +7,270 @@ param(
     [int]$EndID = 10
 )
 
-Write-Host "=== Nintex Forms Export with Authentication ===" -ForegroundColor Green
-Write-Host "Web: $WebUrl"
-Write-Host "List: $ListName"
-Write-Host "Output: $OutputPath"
-Write-Host "ID Range: $StartID to $EndID"
+Write-Host "=== Payload-Based Nintex PDF Export ===" -ForegroundColor Green
+Write-Host "Replicating the exact Print to PDF method"
+
+# Get credentials
+$Credentials = Get-Credential -Message "Enter SAFALO domain credentials (SAFALO\username)"
 
 # Create output directory
 if (!(Test-Path $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force
-    Write-Host "Created output directory: $OutputPath"
 }
 
-# Force credential popup to appear
-Write-Host "`nAuthentication Required" -ForegroundColor Yellow
-Write-Host "You will be prompted for your SAFALO domain credentials" -ForegroundColor White
-Write-Host "Use format: SAFALO\yourusername" -ForegroundColor Gray
+# The PrintToPdf endpoint
+$printToPdfUrl = "$WebUrl/_layouts/15/NintexForms/PrintToPdf.aspx"
+Write-Host "PDF Endpoint: $printToPdfUrl" -ForegroundColor Cyan
 
-$Credentials = Get-Credential -Message "Enter SAFALO domain credentials (format: SAFALO\username)"
-
-if (!$Credentials) {
-    Write-Host "No credentials provided. Exiting." -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Using credentials for: $($Credentials.UserName)" -ForegroundColor Green
-
-# Test authentication first
-Write-Host "`nTesting authentication..." -ForegroundColor Yellow
-$testUrl = "$WebUrl/Lists/$ListName/AllItems.aspx"
-
-try {
-    $testResponse = Invoke-WebRequest -Uri $testUrl -Credential $Credentials -UseBasicParsing -TimeoutSec 15
-    Write-Host "Authentication test: SUCCESS" -ForegroundColor Green
-    Write-Host "Response size: $($testResponse.Content.Length) characters" -ForegroundColor Gray
-}
-catch {
-    Write-Host "Authentication test: FAILED" -ForegroundColor Red
-    Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "`nTroubleshooting tips:" -ForegroundColor Yellow
-    Write-Host "1. Ensure username format is: SAFALO\username" -ForegroundColor White
-    Write-Host "2. Verify your password is correct" -ForegroundColor White
-    Write-Host "3. Check if you have access to SharePoint" -ForegroundColor White
-    Write-Host "4. Try running PowerShell as administrator" -ForegroundColor White
-    exit 1
-}
-
-# Define URL patterns to try - focusing on getting actual form content
-$urlPatterns = @(
-    # Try the working /hr/ URL from your screenshots
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&Source=",
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}",
-    
-    # Try Nintex-specific URLs
-    "https://sp.safalo.com/hr/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    
-    # Try without navigation/chrome
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&IsDlg=1",
-    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}&IsDlg=1",
-    
-    # Try mobile view (often cleaner)
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&mobile=1",
-    
-    # Try print view
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}&PageView=Shared&InitialTabId=Ribbon%2ERead"
-)
-
-# Test URL patterns with authentication
-Write-Host "`nTesting form URL patterns..." -ForegroundColor Yellow
-$workingPattern = $null
-
-foreach ($pattern in $urlPatterns) {
-    $testFormUrl = $pattern -f $StartID
-    Write-Host "Testing: $testFormUrl" -ForegroundColor Gray
+# Function to get the form HTML content (like Nintex does)
+function Get-FormHtml {
+    param(
+        [string]$WebUrl,
+        [string]$ListName,
+        [int]$ItemID,
+        [object]$Credentials
+    )
     
     try {
-        $response = Invoke-WebRequest -Uri $testFormUrl -Credential $Credentials -UseBasicParsing -TimeoutSec 10
+        $formUrl = "$WebUrl/Lists/$ListName/DispForm.aspx?ID=$ItemID"
+        Write-Host "  Getting form HTML from: $formUrl" -ForegroundColor Gray
+        
+        $response = Invoke-WebRequest -Uri $formUrl -Credential $Credentials -UseBasicParsing
         
         if ($response.StatusCode -eq 200) {
-            $contentLength = $response.Content.Length
-            Write-Host "  SUCCESS - $contentLength characters" -ForegroundColor Green
+            # Extract the form HTML - look for the formFiller div or similar
+            $content = $response.Content
             
-            # Check if content looks like a form (not just SharePoint navigation)
-            if ($response.Content -match "Nintex|form|Title.*Email|field.*value" -and $contentLength -gt 5000) {
-                Write-Host "  Appears to contain form data!" -ForegroundColor Green
-                $workingPattern = $pattern
-                break
-            } else {
-                Write-Host "  Contains page content but may not be form data" -ForegroundColor Yellow
-                if (!$workingPattern) { $workingPattern = $pattern }
+            # Try to extract just the Nintex form content
+            if ($content -match '<div[^>]*class="[^"]*nf-FormFiller[^"]*"[^>]*>(.*?)</div>(?=\s*</div>)') {
+                $formHtml = $matches[1]
+                Write-Host "  Extracted Nintex form HTML ($($formHtml.Length) chars)" -ForegroundColor Green
+                return $formHtml
+            }
+            elseif ($content -match '<div[^>]*id="[^"]*formFiller[^"]*"[^>]*>(.*?)</div>') {
+                $formHtml = $matches[1]
+                Write-Host "  Extracted form HTML ($($formHtml.Length) chars)" -ForegroundColor Green
+                return $formHtml
+            }
+            else {
+                Write-Host "  Using full page content" -ForegroundColor Yellow
+                return $content
             }
         }
+        
+        return $null
     }
     catch {
-        Write-Host "  FAILED - $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Error getting form HTML: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
     }
 }
 
-if (!$workingPattern) {
-    Write-Host "`nNo working URL pattern found!" -ForegroundColor Red
-    Write-Host "All form URL patterns failed authentication" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "`nUsing URL pattern: $workingPattern" -ForegroundColor Green
-
-# Find Chrome for PDF conversion
-$chrome = ""
-$chromePaths = @(
-    "C:\Program Files\Google\Chrome\Application\chrome.exe",
-    "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-)
-
-foreach ($path in $chromePaths) {
-    if (Test-Path $path) {
-        $chrome = $path
-        Write-Host "Found Chrome: $chrome" -ForegroundColor Green
-        break
-    }
-}
-
-if (!$chrome) {
-    Write-Host "Chrome not found - will save HTML files only" -ForegroundColor Yellow
-}
-
-# Process each form
-Write-Host "`nStarting form export..." -ForegroundColor Green
-$successCount = 0
-$failedCount = 0
-
-for ($id = $StartID; $id -le $EndID; $id++) {
-    $formUrl = $workingPattern -f $id
-    $htmlFile = "$OutputPath\Form_ID$id.html"
-    $pdfFile = "$OutputPath\NintexForm_ID$id.pdf"
-    
-    Write-Host "`nProcessing ID $id..." -ForegroundColor White
-    Write-Host "  URL: $formUrl" -ForegroundColor Gray
+# Function to call the Nintex PDF endpoint with the payload
+function Invoke-NintexPdfGeneration {
+    param(
+        [string]$PdfEndpoint,
+        [string]$FormHtml,
+        [string]$SiteUrl,
+        [string]$FormUrl,
+        [int]$ItemID,
+        [object]$Credentials,
+        [string]$OutputFile
+    )
     
     try {
-        # Download form content with credentials
-        $response = Invoke-WebRequest -Uri $formUrl -Credential $Credentials -UseBasicParsing -TimeoutSec 15
+        # Generate a form ID (similar to what Nintex does)
+        $formId = "Nintex_PrintPdf_Form_" + [System.Guid]::NewGuid().ToString()
+        
+        # Create the payload similar to what you captured
+        $payload = @{
+            FormHtml = $FormHtml
+            FormLayoutWidth = "900"
+            FormLayoutHeight = "700" 
+            FormUrl = "$FormUrl$ItemID"
+            SiteUrl = $SiteUrl
+            FormId = $formId
+            FormDir = "ltr"
+            FormInlineCss = "[]"
+            FormCssUrls = "[]" 
+            FormImages = "[]"
+        } | ConvertTo-Json -Depth 10
+        
+        Write-Host "  Sending payload to PDF endpoint..." -ForegroundColor Gray
+        Write-Host "  Payload size: $($payload.Length) characters" -ForegroundColor Gray
+        
+        # Make the POST request to the PDF endpoint
+        $response = Invoke-WebRequest -Uri $PdfEndpoint -Method Post -Body $payload -ContentType "application/json" -Credential $Credentials -UseBasicParsing
         
         if ($response.StatusCode -eq 200) {
-            # Create enhanced HTML with form content
-            $enhancedHtml = @"
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Nintex Form - ID $id</title>
-    <style>
-        body { 
-            font-family: Segoe UI, Arial, sans-serif; 
-            margin: 20px; 
-            line-height: 1.6; 
-            background: white; 
-        }
-        .form-header { 
-            background: #0072C6; 
-            color: white; 
-            padding: 15px; 
-            margin-bottom: 20px; 
-            border-radius: 5px; 
-        }
-        .form-title { 
-            font-size: 24px; 
-            font-weight: bold; 
-            margin-bottom: 5px; 
-        }
-        .form-subtitle { 
-            font-size: 14px; 
-            opacity: 0.9; 
-        }
-        .form-content { 
-            background: white; 
-            padding: 20px; 
-            border-radius: 5px; 
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
-        }
-        /* Hide SharePoint navigation */
-        #s4-ribbonrow, #suiteBarTop, .ms-cui-ribbon, .ms-breadcrumb-top,
-        .ms-webpart-chrome-title, #sideNavBox, #contentBox { 
-            display: none !important; 
-        }
-        @media print { 
-            body { margin: 0; }
-            .form-header { 
-                background: #0072C6 !important; 
-                -webkit-print-color-adjust: exact; 
+            # Check if response is PDF content
+            $contentType = $response.Headers['Content-Type']
+            if ($contentType -like "*pdf*" -or $response.Content[0..3] -join '' -match '%PDF') {
+                Write-Host "  Received PDF response ($($response.Content.Length) bytes)" -ForegroundColor Green
+                [System.IO.File]::WriteAllBytes($OutputFile, $response.Content)
+                return $true
+            }
+            else {
+                Write-Host "  Response not PDF format" -ForegroundColor Yellow
+                Write-Host "  Content-Type: $contentType" -ForegroundColor Gray
+                
+                # Save response for debugging
+                $debugFile = $OutputFile -replace '\.pdf$', '_debug.html'
+                $response.Content | Out-File -FilePath $debugFile -Encoding UTF8
+                Write-Host "  Debug response saved: $debugFile" -ForegroundColor Gray
+                
+                return $false
             }
         }
-    </style>
-</head>
-<body>
-    <div class="form-header">
-        <div class="form-title">Nintex Form Export</div>
-        <div class="form-subtitle">Form ID: $id | Exported: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</div>
-    </div>
-    <div class="form-content">
-        $($response.Content)
-    </div>
-</body>
-</html>
-"@
+        
+        return $false
+    }
+    catch {
+        Write-Host "  PDF generation error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
 
-            # Save HTML file
-            [System.IO.File]::WriteAllText($htmlFile, $enhancedHtml, [System.Text.Encoding]::UTF8)
-            Write-Host "  HTML saved: $([System.IO.Path]::GetFileName($htmlFile))" -ForegroundColor Green
+# Alternative method - try to call the endpoint differently
+function Invoke-NintexPdfAlternative {
+    param(
+        [string]$WebUrl,
+        [string]$ListName,
+        [int]$ItemID,
+        [object]$Credentials,
+        [string]$OutputFile
+    )
+    
+    try {
+        # Try different PDF endpoint patterns
+        $alternativeEndpoints = @(
+            "$WebUrl/_layouts/15/NintexForms/PrintToPdf.aspx",
+            "$WebUrl/_layouts/NintexForms/PrintToPdf.aspx",
+            "$WebUrl/_vti_bin/NintexFormsServices/NfRestService.svc/GetFormPdf"
+        )
+        
+        foreach ($endpoint in $alternativeEndpoints) {
+            Write-Host "  Trying endpoint: $endpoint" -ForegroundColor Gray
             
-            # Convert to PDF if Chrome is available
-            if ($chrome) {
-                $fileUri = "file:///$($htmlFile.Replace('\', '/'))"
-                & $chrome --headless --disable-gpu --no-sandbox --print-to-pdf="$pdfFile" "$fileUri" 2>$null
-                Start-Sleep -Seconds 3
+            # Try with simple parameters
+            $simplePayload = "listName=$ListName&itemId=$ItemID"
+            
+            try {
+                $response = Invoke-WebRequest -Uri $endpoint -Method Post -Body $simplePayload -ContentType "application/x-www-form-urlencoded" -Credential $Credentials -UseBasicParsing -TimeoutSec 30
                 
-                if (Test-Path $pdfFile) {
-                    $pdfSize = (Get-Item $pdfFile).Length
-                    Write-Host "  PDF created: $([System.IO.Path]::GetFileName($pdfFile)) ($pdfSize bytes)" -ForegroundColor Green
-                    
-                    # Remove HTML file if PDF was successful
-                    Remove-Item $htmlFile -Force -ErrorAction SilentlyContinue
+                if ($response.StatusCode -eq 200 -and $response.Content.Length -gt 1000) {
+                    [System.IO.File]::WriteAllBytes($OutputFile, $response.Content)
+                    Write-Host "  Alternative method worked!" -ForegroundColor Green
+                    return $true
+                }
+            }
+            catch {
+                Write-Host "  Endpoint failed: $($_.Exception.Message)" -ForegroundColor Red
+                continue
+            }
+        }
+        
+        return $false
+    }
+    catch {
+        Write-Host "  Alternative method error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Test with first form
+Write-Host "`nTesting with ID $StartID..." -ForegroundColor Yellow
+
+$testPdfFile = "$OutputPath\test_payload_ID$StartID.pdf"
+
+# Step 1: Get the form HTML
+$formHtml = Get-FormHtml -WebUrl $WebUrl -ListName $ListName -ItemID $StartID -Credentials $Credentials
+
+if ($formHtml) {
+    Write-Host "Successfully retrieved form HTML" -ForegroundColor Green
+    
+    # Step 2: Try to generate PDF using the payload method
+    $siteUrl = "https://sp.safalo.com"
+    $formUrl = "$WebUrl/Lists/$ListName/DispForm.aspx?ID="
+    
+    $success = Invoke-NintexPdfGeneration -PdfEndpoint $printToPdfUrl -FormHtml $formHtml -SiteUrl $siteUrl -FormUrl $formUrl -ItemID $StartID -Credentials $Credentials -OutputFile $testPdfFile
+    
+    if (!$success) {
+        Write-Host "Payload method failed, trying alternative..." -ForegroundColor Yellow
+        $success = Invoke-NintexPdfAlternative -WebUrl $WebUrl -ListName $ListName -ItemID $StartID -Credentials $Credentials -OutputFile $testPdfFile
+    }
+    
+    if ($success) {
+        $fileSize = (Get-Item $testPdfFile).Length
+        Write-Host "SUCCESS! Test PDF created: $fileSize bytes" -ForegroundColor Green
+        Write-Host "Test file: $testPdfFile" -ForegroundColor Cyan
+        
+        # If test worked, process all forms
+        Write-Host "`nTest successful! Processing all forms..." -ForegroundColor Green
+        
+        $successCount = 0
+        $failedCount = 0
+        
+        for ($id = $StartID; $id -le $EndID; $id++) {
+            if ($id -eq $StartID) {
+                # Already processed the first one
+                $successCount++
+                continue
+            }
+            
+            $pdfFile = "$OutputPath\NintexForm_ID$id.pdf"
+            Write-Host "`nProcessing ID $id..." -ForegroundColor White
+            
+            $itemFormHtml = Get-FormHtml -WebUrl $WebUrl -ListName $ListName -ItemID $id -Credentials $Credentials
+            
+            if ($itemFormHtml) {
+                $itemSuccess = Invoke-NintexPdfGeneration -PdfEndpoint $printToPdfUrl -FormHtml $itemFormHtml -SiteUrl $siteUrl -FormUrl $formUrl -ItemID $id -Credentials $Credentials -OutputFile $pdfFile
+                
+                if (!$itemSuccess) {
+                    $itemSuccess = Invoke-NintexPdfAlternative -WebUrl $WebUrl -ListName $ListName -ItemID $id -Credentials $Credentials -OutputFile $pdfFile
+                }
+                
+                if ($itemSuccess) {
+                    $fileSize = (Get-Item $pdfFile).Length
+                    Write-Host "  SUCCESS - $fileSize bytes" -ForegroundColor Green
                     $successCount++
                 } else {
-                    Write-Host "  PDF conversion failed, keeping HTML" -ForegroundColor Yellow
-                    $successCount++  # Count HTML as success
+                    Write-Host "  FAILED" -ForegroundColor Red
+                    $failedCount++
                 }
             } else {
-                Write-Host "  HTML file created (no Chrome for PDF)" -ForegroundColor Green
-                $successCount++
+                Write-Host "  FAILED - Could not get form HTML" -ForegroundColor Red
+                $failedCount++
             }
-        } else {
-            Write-Host "  FAILED - HTTP $($response.StatusCode)" -ForegroundColor Red
-            $failedCount++
+            
+            Start-Sleep -Seconds 1
         }
-    }
-    catch {
-        Write-Host "  FAILED - $($_.Exception.Message)" -ForegroundColor Red
-        $failedCount++
         
-        # Log failed URL
-        "$formUrl" | Out-File -FilePath "$OutputPath\FailedURLs.txt" -Append
+        # Summary
+        Write-Host "`n=== EXPORT SUMMARY ===" -ForegroundColor Cyan
+        Write-Host "Total processed: $($successCount + $failedCount)" -ForegroundColor White
+        Write-Host "Successful: $successCount" -ForegroundColor Green
+        Write-Host "Failed: $failedCount" -ForegroundColor Red
+        
+        if ($successCount -gt 0) {
+            Write-Host "`n=== SCALING TO 10,000 FORMS ===" -ForegroundColor Yellow
+            Write-Host "This method can be scaled up for bulk processing:" -ForegroundColor White
+            Write-Host "1. Uses authentic Nintex PDF generation" -ForegroundColor White
+            Write-Host "2. Direct API calls - much faster than browser automation" -ForegroundColor White
+            Write-Host "3. Can handle large batches efficiently" -ForegroundColor White
+        }
+        
+    } else {
+        Write-Host "Both methods failed." -ForegroundColor Red
+        Write-Host "The PDF endpoint may require additional parameters or authentication." -ForegroundColor Yellow
+        
+        Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
+        Write-Host "1. Check if there are additional headers needed" -ForegroundColor White
+        Write-Host "2. Verify the exact endpoint URL from network tools" -ForegroundColor White
+        Write-Host "3. Look for any form validation tokens or session IDs" -ForegroundColor White
     }
-    
-    # Progress indicator
-    $processed = ($id - $StartID + 1)
-    $total = ($EndID - $StartID + 1)
-    $percentComplete = [Math]::Round(($processed / $total) * 100, 1)
-    Write-Progress -Activity "Exporting Forms" -Status "$processed of $total processed" -PercentComplete $percentComplete
-    
-    # Small delay to avoid overwhelming the server
-    Start-Sleep -Seconds 1
+} else {
+    Write-Host "Could not retrieve form HTML. Check authentication and URL." -ForegroundColor Red
 }
 
-Write-Progress -Activity "Exporting Forms" -Completed
-
-# Final summary
-Write-Host "`n=== EXPORT SUMMARY ===" -ForegroundColor Cyan
-Write-Host "Total forms processed: $($successCount + $failedCount)" -ForegroundColor White
-Write-Host "Successful exports: $successCount" -ForegroundColor Green
-Write-Host "Failed exports: $failedCount" -ForegroundColor Red
-
-if ($successCount + $failedCount -gt 0) {
-    $successRate = [Math]::Round(($successCount / ($successCount + $failedCount)) * 100, 1)
-    Write-Host "Success rate: $successRate%" -ForegroundColor White
-}
-
-Write-Host "Output directory: $OutputPath" -ForegroundColor Cyan
-
-if ($failedCount -gt 0) {
-    Write-Host "Failed URLs logged to: $OutputPath\FailedURLs.txt" -ForegroundColor Yellow
-}
-
-# Create export log
-$logData = @{
-    ExportDate = Get-Date
-    WebUrl = $WebUrl
-    ListName = $ListName
-    IDRange = "$StartID-$EndID"
-    SuccessfulExports = $successCount
-    FailedExports = $failedCount
-    OutputPath = $OutputPath
-    URLPattern = $workingPattern
-    AuthenticationUser = $Credentials.UserName
-} | ConvertTo-Json -Depth 2
-
-$logFile = "$OutputPath\ExportLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
-$logData | Out-File -FilePath $logFile -Encoding UTF8
-
-Write-Host "Export log saved: $logFile" -ForegroundColor Gray
-
-Write-Host "`nExport completed!" -ForegroundColor Green
-
-# Show next steps for scaling to 10,000 forms
-if ($successCount -gt 0) {
-    Write-Host "`n=== SCALING TO 10,000 FORMS ===" -ForegroundColor Yellow
-    Write-Host "Since this test worked, you can now scale up:" -ForegroundColor White
-    Write-Host "1. Increase the ID range: -StartID 1 -EndID 10000" -ForegroundColor White
-    Write-Host "2. Process in batches: run multiple times with smaller ranges" -ForegroundColor White
-    Write-Host "3. Expected time for 10,000: 2-4 hours" -ForegroundColor White
-    Write-Host "4. Monitor disk space: ~50-100MB per 1,000 forms" -ForegroundColor White
-}
-
-Write-Host "`nDone!" -ForegroundColor Green
+Write-Host "`nPayload-based export completed!" -ForegroundColor Green
