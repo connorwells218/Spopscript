@@ -1,13 +1,11 @@
 <#
-Exports SharePoint 2016 (on-prem) Nintex Display Forms to PDF
-- Auth: Windows Integrated (popup prompt is fine)
-- Browser: Microsoft Edge (Chromium) + msedgedriver.exe
-- PDF: DevTools Page.printToPDF (saves directly, no dialogs)
+Exports SharePoint 2016 Nintex Display Forms to PDF using Edge + Selenium + DevTools.
+- Auth: Windows prompt OK
+- Works when launched from ISE or console
+- Auto-downloads Selenium DLLs (or load from .\bin if offline)
 
-Make sure:
-- msedgedriver.exe is at C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe
-- Run this script as a domain user who can open the list items
-- Selenium DLLs (WebDriver.dll + WebDriver.Support.dll) are loaded (see Ensure-SeleniumAssemblies)
+Prereqs:
+- msedgedriver.exe at: C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe
 #>
 
 param(
@@ -15,48 +13,52 @@ param(
   [string]$ListName   = "OnboardingList",
   [int]   $StartID    = 1,
   [int]   $EndID      = 10,
-  [string]$OutputPath = "C:\Exports\NintexForms"
+  [string]$OutputPath = "C:\Exports\NintexForms",
+  [switch]$Offline    # if set, don’t try to download Selenium DLLs; load from .\bin
 )
 
-# -------------------- helpers --------------------
+# ---------- utilities ----------
+# robust script root (works in ISE and console)
+$ScriptRoot =
+    if ($PSScriptRoot) { $PSScriptRoot }
+    elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath }
+    else { (Get-Location).Path }
+
 function Ensure-Folder([string]$p) {
-  if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+  if (-not [string]::IsNullOrWhiteSpace($p) -and -not (Test-Path $p)) {
+    New-Item -ItemType Directory -Path $p -Force | Out-Null
+  }
 }
 
-function Get-ScriptDir {
-  Split-Path -Parent $MyInvocation.MyCommand.Path
-}
+# ensure we can download from NuGet (older Windows defaults)
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 function Ensure-SeleniumAssemblies {
-  $root = Get-ScriptDir
-  $bin  = Join-Path $root "bin"
+  $bin = Join-Path $ScriptRoot "bin"
   Ensure-Folder $bin
 
-  $need = @(
-    "WebDriver.dll",
-    "WebDriver.Support.dll"
-  )
+  $wd  = Join-Path $bin "WebDriver.dll"
+  $sup = Join-Path $bin "WebDriver.Support.dll"
 
-  $dllsPresent = $true
-  foreach ($f in $need) {
-    if (-not (Test-Path (Join-Path $bin $f))) { $dllsPresent = $false }
-  }
-
-  if (-not $dllsPresent) {
-    Write-Host "Downloading Selenium assemblies..." -ForegroundColor Yellow
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-    $pkgs = @{
-      "Selenium.WebDriver.4.22.0.nupkg" = "https://globalcdn.nuget.org/packages/selenium.webdriver.4.22.0.nupkg"
-      "Selenium.Support.4.22.0.nupkg"   = "https://globalcdn.nuget.org/packages/selenium.support.4.22.0.nupkg"
+  if (-not (Test-Path $wd -PathType Leaf) -or -not (Test-Path $sup -PathType Leaf)) {
+    if ($Offline) {
+      throw "Selenium DLLs not found in `"$bin`" and -Offline was specified. Place WebDriver.dll and WebDriver.Support.dll there."
     }
 
-    foreach ($kv in $pkgs.GetEnumerator()) {
-      $dest = Join-Path $bin $kv.Key
-      if (-not (Test-Path $dest)) {
-        Invoke-WebRequest -Uri $kv.Value -OutFile $dest
+    Write-Host "Downloading Selenium assemblies to $bin ..." -ForegroundColor Yellow
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $packages = @{
+      "selenium.webdriver.4.22.0.nupkg" = "https://globalcdn.nuget.org/packages/selenium.webdriver.4.22.0.nupkg"
+      "selenium.support.4.22.0.nupkg"   = "https://globalcdn.nuget.org/packages/selenium.support.4.22.0.nupkg"
+    }
+
+    foreach ($kv in $packages.GetEnumerator()) {
+      $nupkgPath = Join-Path $bin $kv.Key
+      if (-not (Test-Path $nupkgPath)) {
+        Invoke-WebRequest -Uri $kv.Value -OutFile $nupkgPath
       }
-      $zip = [IO.Compression.ZipFile]::OpenRead($dest)
+      $zip = [IO.Compression.ZipFile]::OpenRead($nupkgPath)
       foreach ($entry in $zip.Entries) {
         if ($entry.FullName -like "lib/net48/*.dll") {
           $out = Join-Path $bin ([IO.Path]::GetFileName($entry.FullName))
@@ -69,8 +71,8 @@ function Ensure-SeleniumAssemblies {
     }
   }
 
-  Add-Type -Path (Join-Path $bin "WebDriver.dll")        -ErrorAction Stop
-  Add-Type -Path (Join-Path $bin "WebDriver.Support.dll") -ErrorAction Stop
+  Add-Type -Path $wd -ErrorAction Stop
+  Add-Type -Path $sup -ErrorAction Stop
 }
 
 function Wait-ForNintexRender($driver, [int]$timeoutSec = 45) {
@@ -98,14 +100,13 @@ function Save-PdfFromDevTools($driver, [string]$path) {
     "marginLeft"        = 0.4
     "marginRight"       = 0.4
     "preferCSSPageSize" = $true
-    "paperWidth"        = 8.5   # Letter size
+    "paperWidth"        = 8.5
     "paperHeight"       = 11.0
   }
   $resp = $driver.ExecuteCdpCommand("Page.printToPDF", $args)
-  $b64  = $resp["data"]
-  [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($b64)) | Out-Null
+  [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($resp["data"])) | Out-Null
 }
-# -------------------- /helpers --------------------
+# ---------- /utilities ----------
 
 Write-Host "Edge + Selenium + DevTools PDF export" -ForegroundColor Cyan
 Write-Host "Site : $WebUrl"  -ForegroundColor Gray
@@ -114,7 +115,7 @@ Write-Host "List : $ListName  IDs: $StartID..$EndID" -ForegroundColor Gray
 Ensure-Folder $OutputPath
 Ensure-SeleniumAssemblies
 
-# Path to msedgedriver.exe
+# Path to EdgeDriver
 $driverPath = 'C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe'
 $driverDir  = Split-Path $driverPath -Parent
 $driverName = Split-Path $driverPath -Leaf
@@ -123,14 +124,18 @@ $driverName = Split-Path $driverPath -Leaf
 $edgeSvc = [OpenQA.Selenium.Edge.EdgeDriverService]::CreateDefaultService($driverDir, $driverName)
 $edgeSvc.HideCommandPromptWindow = $true
 
+# Edge options
 $opts = New-Object OpenQA.Selenium.Edge.EdgeOptions
 $opts.UseChromium = $true
-$opts.AddArgument("--auth-server-allowlist=" + ([Uri]$WebUrl).Host)
-$opts.AddArgument("--auth-negotiate-delegate-whitelist=" + ([Uri]$WebUrl).Host)
+
+$host = ([Uri]$WebUrl).Host
+$opts.AddArgument("--auth-server-allowlist=$host")
+$opts.AddArgument("--auth-negotiate-delegate-whitelist=$host")
 $opts.AddArgument("--disable-features=BlockInsecurePrivateNetworkRequests")
-$opts.AddArgument("--headless=new")    # remove if you want a visible browser
+$opts.AddArgument("--headless=new")     # remove this line if you prefer a visible window
 $opts.AddArgument("--disable-gpu")
 
+# Launch Edge
 $driver = New-Object OpenQA.Selenium.Edge.EdgeDriver($edgeSvc, $opts)
 $driver.Manage().Timeouts().PageLoad = [TimeSpan]::FromSeconds(180)
 
@@ -143,10 +148,13 @@ try {
     Write-Host "ID $id → $url" -ForegroundColor White
     try {
       $driver.Navigate().GoToUrl($url) | Out-Null
+
       if (-not (Wait-ForNintexRender $driver 60)) {
         Write-Host "  (Warning) Form may not be fully rendered; proceeding..." -ForegroundColor Yellow
       }
+
       Save-PdfFromDevTools -driver $driver -path $out
+
       if (Test-Path $out) {
         $bytes = (Get-Item $out).Length
         Write-Host ("  Saved {0:N0} bytes → {1}" -f $bytes, $out) -ForegroundColor Green
@@ -163,7 +171,7 @@ try {
   }
 }
 finally {
-  $driver.Quit()
+  if ($driver) { $driver.Quit() }
 }
 
 Write-Host "`n=== RESULTS ===" -ForegroundColor Cyan
