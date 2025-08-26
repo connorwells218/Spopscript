@@ -1,215 +1,230 @@
-# Fixed Form Export - Gets actual form content, not SharePoint navigation
+# Alternative Authentication Methods for SharePoint Forms Export
+
 param(
-    [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
-    [string]$ListName = "OnboardingList", 
-    [string]$OutputPath = "C:\Exports\NintexForms",
-    [int]$TestID = 2  # Start with a single ID to test
+    [string]$TestUrl = "https://sp.safalo.com/ConnorsWorkshop/Lists/OnboardingList/DispForm.aspx?ID=2"
 )
 
-Write-Host "Fixed Form Export - Testing URL Patterns" -ForegroundColor Green
-Write-Host "Web: $WebUrl"
-Write-Host "List: $ListName"
-Write-Host "Testing with ID: $TestID"
+Write-Host "Testing Alternative Authentication Methods" -ForegroundColor Green
 
-# Create output directory
-if (!(Test-Path $OutputPath)) {
-    New-Item -ItemType Directory -Path $OutputPath -Force
-}
-
-# Multiple URL patterns to try - based on what we've seen in your screenshots
-$urlPatterns = @(
-    # Pattern 1: Standard SharePoint display form
-    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}",
-    
-    # Pattern 2: Your actual working URL from screenshots  
-    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}",
-    
-    # Pattern 3: Nintex form specific URL
-    "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    
-    # Pattern 4: Alternative Nintex pattern
-    "https://sp.safalo.com/hr/Lists/$ListName/Item/displayifs.aspx?ID={0}",
-    
-    # Pattern 5: Direct form view
-    "$WebUrl/_layouts/15/listform.aspx?PageType=4&ListId={{list-id}}&ID={0}",
-    
-    # Pattern 6: Alternative layout
-    "$WebUrl/Lists/$ListName/EditForm.aspx?ID={0}"
-)
-
-function Test-FormUrl {
-    param([string]$Url, [int]$PatternNum)
-    
-    Write-Host "`nTesting Pattern $PatternNum`: $Url" -ForegroundColor Yellow
+# Method 1: Internet Explorer with integrated Windows auth
+function Test-InternetExplorer {
+    Write-Host "`nMethod 1: Using Internet Explorer COM object..." -ForegroundColor Yellow
     
     try {
-        $response = Invoke-WebRequest -Uri $Url -UseDefaultCredentials -UseBasicParsing -TimeoutSec 15
+        $ie = New-Object -ComObject InternetExplorer.Application
+        $ie.Visible = $false
+        $ie.Silent = $true
         
-        # Check if we got actual form content vs SharePoint navigation
-        $content = $response.Content
+        Write-Host "Navigating to: $TestUrl"
+        $ie.Navigate($TestUrl)
         
-        # Look for indicators of actual form content
-        $hasFormData = $false
-        $contentType = "Unknown"
-        
-        if ($content -match "Nintex.*Form" -or $content -match "displayifs" -or $content -match "form.*data") {
-            $hasFormData = $true
-            $contentType = "Nintex Form"
-        }
-        elseif ($content -match "SharePoint.*navigation" -or $content -match "Skip Ribbon Commands" -or $content -match "Site Contents") {
-            $contentType = "SharePoint Navigation (Not Form)"
-        }
-        elseif ($content -match "Title.*Email.*Department" -or $content -match "field.*value" -or $content.Length -gt 10000) {
-            $hasFormData = $true
-            $contentType = "Form Content"
+        # Wait for page to load
+        while ($ie.Busy -or $ie.ReadyState -ne 4) {
+            Start-Sleep -Seconds 1
         }
         
-        $contentSize = $content.Length
+        $content = $ie.Document.documentElement.innerHTML
+        $ie.Quit()
         
-        if ($hasFormData) {
-            Write-Host "  SUCCESS - Got form content ($contentSize chars, $contentType)" -ForegroundColor Green
-            return @{ Success = $true; Content = $content; Url = $Url }
+        if ($content -and $content.Length -gt 1000) {
+            Write-Host "SUCCESS - IE method works! Content length: $($content.Length)" -ForegroundColor Green
+            return $content
         } else {
-            Write-Host "  PARTIAL - Got SharePoint page but not form ($contentSize chars, $contentType)" -ForegroundColor Yellow
-            return @{ Success = $false; Content = $content; Url = $Url; Reason = $contentType }
+            Write-Host "FAILED - No content retrieved" -ForegroundColor Red
+            return $null
         }
     }
     catch {
-        Write-Host "  FAILED - $($_.Exception.Message)" -ForegroundColor Red
-        return @{ Success = $false; Content = $null; Url = $Url; Reason = $_.Exception.Message }
+        Write-Host "FAILED - IE error: $($_.Exception.Message)" -ForegroundColor Red
+        if ($ie) { $ie.Quit() }
+        return $null
     }
 }
 
-function Save-FormContent {
-    param([string]$Content, [string]$OutputFile)
+# Method 2: Direct browser automation
+function Test-DirectBrowser {
+    Write-Host "`nMethod 2: Direct browser with credentials..." -ForegroundColor Yellow
     
-    # Create a better HTML structure for the form
-    $improvedHtml = @"
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Nintex Form Export</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
-        .form-container { max-width: 800px; margin: 0 auto; }
-        .form-header { background: #0072C6; color: white; padding: 15px; margin-bottom: 20px; }
-        .form-content { background: white; padding: 20px; }
-        /* Hide SharePoint navigation elements */
-        #s4-ribbonrow, #suiteBarTop, .ms-cui-ribbon, .ms-breadcrumb-top { display: none !important; }
-        .ms-webpart-chrome-title { display: none !important; }
-        @media print { 
-            body { margin: 0; }
-            .no-print { display: none !important; }
-        }
-    </style>
-</head>
-<body>
-    <div class="form-container">
-        <div class="form-header">
-            <h2>Nintex Form - ID $TestID</h2>
-            <p>Exported: $(Get-Date)</p>
-        </div>
-        <div class="form-content">
-            $Content
-        </div>
-    </div>
-</body>
-</html>
-"@
-
     try {
-        [System.IO.File]::WriteAllText($OutputFile, $improvedHtml, [System.Text.Encoding]::UTF8)
-        return $true
+        # Create a temporary batch file that opens browser with URL
+        $batchFile = "$env:TEMP\open_form.bat"
+        $batchContent = @"
+@echo off
+start "" "$TestUrl"
+"@
+        $batchContent | Out-File -FilePath $batchFile -Encoding ASCII
+        
+        Write-Host "Opening browser automatically..."
+        Start-Process -FilePath $batchFile -Wait
+        
+        Write-Host "Manual step required:" -ForegroundColor Yellow
+        Write-Host "1. Browser should have opened with the form" -ForegroundColor White
+        Write-Host "2. Login if prompted" -ForegroundColor White
+        Write-Host "3. Verify you can see the Nintex form" -ForegroundColor White
+        
+        Remove-Item $batchFile -Force -ErrorAction SilentlyContinue
+        
+        $response = Read-Host "Can you see the Nintex form in your browser? (y/n)"
+        return $response -eq "y"
     }
     catch {
-        Write-Host "Failed to save HTML: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "FAILED - Browser test error: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
 
-# Test each URL pattern
-$workingPattern = $null
-$bestResult = $null
-
-Write-Host "`nTesting URL patterns for ID $TestID..." -ForegroundColor Cyan
-
-for ($i = 0; $i -lt $urlPatterns.Count; $i++) {
-    $testUrl = $urlPatterns[$i] -f $TestID
-    $result = Test-FormUrl -Url $testUrl -PatternNum ($i + 1)
+# Method 3: WebClient with Windows authentication
+function Test-WebClient {
+    Write-Host "`nMethod 3: WebClient with Windows credentials..." -ForegroundColor Yellow
     
-    if ($result.Success) {
-        $workingPattern = $urlPatterns[$i]
-        $bestResult = $result
-        Write-Host "  FOUND WORKING PATTERN!" -ForegroundColor Green
-        break
-    }
-    elseif ($result.Content -and $result.Content.Length -gt 5000) {
-        # Keep track of the best non-form result as fallback
-        if (!$bestResult -or $result.Content.Length -gt $bestResult.Content.Length) {
-            $bestResult = $result
+    try {
+        $webClient = New-Object System.Net.WebClient
+        $webClient.UseDefaultCredentials = $true
+        $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+        $content = $webClient.DownloadString($TestUrl)
+        $webClient.Dispose()
+        
+        if ($content -and $content.Length -gt 1000) {
+            Write-Host "SUCCESS - WebClient works! Content length: $($content.Length)" -ForegroundColor Green
+            return $content
+        } else {
+            Write-Host "FAILED - No content retrieved" -ForegroundColor Red
+            return $null
         }
+    }
+    catch {
+        Write-Host "FAILED - WebClient error: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
     }
 }
 
-if (!$workingPattern -and $bestResult) {
-    Write-Host "`nNo perfect pattern found, using best available..." -ForegroundColor Yellow
-    $workingPattern = $bestResult.Url
+# Method 4: PowerShell with explicit Windows authentication
+function Test-ExplicitWindowsAuth {
+    Write-Host "`nMethod 4: Explicit Windows authentication..." -ForegroundColor Yellow
+    
+    try {
+        # Get current user context
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        Write-Host "Current user: $($currentUser.Name)"
+        
+        # Create network credential from current Windows user
+        $credential = [System.Net.CredentialCache]::DefaultNetworkCredentials
+        
+        $request = [System.Net.WebRequest]::Create($TestUrl)
+        $request.Credentials = $credential
+        $request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        
+        $response = $request.GetResponse()
+        $stream = $response.GetResponseStream()
+        $reader = New-Object System.IO.StreamReader($stream)
+        $content = $reader.ReadToEnd()
+        $reader.Close()
+        $stream.Close()
+        $response.Close()
+        
+        if ($content -and $content.Length -gt 1000) {
+            Write-Host "SUCCESS - Explicit auth works! Content length: $($content.Length)" -ForegroundColor Green
+            return $content
+        } else {
+            Write-Host "FAILED - No content retrieved" -ForegroundColor Red
+            return $null
+        }
+    }
+    catch {
+        Write-Host "FAILED - Explicit auth error: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
 }
 
-if ($workingPattern) {
-    Write-Host "`nUsing pattern: $workingPattern" -ForegroundColor Green
+# Method 5: Manual browser with file save
+function Test-ManualBrowserSave {
+    Write-Host "`nMethod 5: Manual browser save method..." -ForegroundColor Yellow
     
-    # Save test HTML
-    $testHtmlFile = "$OutputPath\TestForm_ID$TestID.html"
-    if (Save-FormContent -Content $bestResult.Content -OutputFile $testHtmlFile) {
-        Write-Host "Test HTML saved: $testHtmlFile" -ForegroundColor Green
-        
-        # Convert to PDF
-        $testPdfFile = "$OutputPath\TestForm_ID$TestID.pdf"
-        
-        # Try Chrome first
-        $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-        if (Test-Path $chrome) {
-            $fileUri = "file:///$($testHtmlFile.Replace('\', '/'))"
-            & $chrome --headless --disable-gpu --no-sandbox --print-to-pdf="$testPdfFile" "$fileUri" 2>$null
-            Start-Sleep -Seconds 4
-            
-            if (Test-Path $testPdfFile) {
-                $pdfSize = (Get-Item $testPdfFile).Length
-                Write-Host "PDF created successfully: $pdfSize bytes" -ForegroundColor Green
-                Write-Host "PDF location: $testPdfFile" -ForegroundColor Cyan
-            } else {
-                Write-Host "PDF creation failed" -ForegroundColor Red
-            }
-        }
-        
-        # Show results
-        Write-Host "`n=== TEST RESULTS ===" -ForegroundColor Cyan
-        Write-Host "Working URL pattern: $workingPattern" -ForegroundColor White
-        Write-Host "Test HTML: $testHtmlFile" -ForegroundColor White
-        Write-Host "Test PDF: $testPdfFile" -ForegroundColor White
-        
-        Write-Host "`nNext steps:" -ForegroundColor Yellow
-        Write-Host "1. Check the HTML and PDF files to verify they contain actual form data" -ForegroundColor White
-        Write-Host "2. If they look good, use this pattern for bulk export" -ForegroundColor White
-        Write-Host "3. If not, we may need to try different approaches" -ForegroundColor White
-        
-        # Provide bulk export command
-        Write-Host "`nFor bulk export, use:" -ForegroundColor Green
-        Write-Host ".\BulkExport.ps1 -UrlPattern '$workingPattern' -StartID 1 -EndID 100" -ForegroundColor Gray
+    Write-Host "This method requires manual steps:" -ForegroundColor Cyan
+    Write-Host "1. Open your browser manually" -ForegroundColor White
+    Write-Host "2. Navigate to: $TestUrl" -ForegroundColor White
+    Write-Host "3. Login with your SAFALO credentials" -ForegroundColor White
+    Write-Host "4. Right-click on the page -> Save As -> Complete HTML" -ForegroundColor White
+    Write-Host "5. Save to: C:\temp\manual_form.html" -ForegroundColor White
+    
+    Read-Host "Press Enter when you've completed the manual save"
+    
+    $savedFile = "C:\temp\manual_form.html"
+    if (Test-Path $savedFile) {
+        $content = Get-Content $savedFile -Raw
+        Write-Host "SUCCESS - Manual save worked! File size: $((Get-Item $savedFile).Length) bytes" -ForegroundColor Green
+        return $content
+    } else {
+        Write-Host "FAILED - Manual save file not found" -ForegroundColor Red
+        return $null
     }
+}
+
+# Test each method
+Write-Host "Testing authentication methods for: $TestUrl" -ForegroundColor Cyan
+
+$workingContent = $null
+$workingMethod = $null
+
+# Test Method 1: Internet Explorer
+$content1 = Test-InternetExplorer
+if ($content1) { $workingContent = $content1; $workingMethod = "Internet Explorer" }
+
+# Test Method 2: Direct Browser (if IE failed)
+if (!$workingContent) {
+    $browserWorked = Test-DirectBrowser
+    if ($browserWorked) { $workingMethod = "Direct Browser" }
+}
+
+# Test Method 3: WebClient (if IE failed)
+if (!$workingContent) {
+    $content3 = Test-WebClient  
+    if ($content3) { $workingContent = $content3; $workingMethod = "WebClient" }
+}
+
+# Test Method 4: Explicit Windows Auth (if WebClient failed)
+if (!$workingContent) {
+    $content4 = Test-ExplicitWindowsAuth
+    if ($content4) { $workingContent = $content4; $workingMethod = "Explicit Windows Auth" }
+}
+
+# Test Method 5: Manual save (if all automated methods failed)
+if (!$workingContent) {
+    $content5 = Test-ManualBrowserSave
+    if ($content5) { $workingContent = $content5; $workingMethod = "Manual Browser Save" }
+}
+
+# Results
+Write-Host "`n=== AUTHENTICATION TEST RESULTS ===" -ForegroundColor Cyan
+
+if ($workingContent) {
+    Write-Host "SUCCESS: $workingMethod works!" -ForegroundColor Green
+    Write-Host "Content length: $($workingContent.Length) characters" -ForegroundColor White
+    
+    # Check if it's actual form content
+    if ($workingContent -match "Nintex" -or $workingContent -match "form" -or $workingContent -match "Title.*Email") {
+        Write-Host "Content appears to be a form!" -ForegroundColor Green
+    } else {
+        Write-Host "Content might be SharePoint navigation, not form data" -ForegroundColor Yellow
+    }
+    
+    # Save test content
+    $testFile = "C:\temp\test_auth_content.html"
+    if (!(Test-Path "C:\temp")) { New-Item -ItemType Directory -Path "C:\temp" -Force }
+    $workingContent | Out-File -FilePath $testFile -Encoding UTF8
+    Write-Host "Test content saved to: $testFile" -ForegroundColor Cyan
+    
+    Write-Host "`nNext steps:" -ForegroundColor Yellow
+    Write-Host "1. Check the saved HTML file to verify it contains form data" -ForegroundColor White
+    Write-Host "2. If it looks good, we can build a bulk export using the $workingMethod method" -ForegroundColor White
 } else {
-    Write-Host "`nNo working URL pattern found." -ForegroundColor Red
-    Write-Host "Possible issues:" -ForegroundColor Yellow
-    Write-Host "1. The list name '$ListName' might be incorrect" -ForegroundColor White
-    Write-Host "2. The web URL might be wrong" -ForegroundColor White  
-    Write-Host "3. The forms might use a different URL structure" -ForegroundColor White
-    Write-Host "4. Authentication issues" -ForegroundColor White
-    
-    Write-Host "`nTry these commands manually in your browser:" -ForegroundColor Cyan
-    Write-Host "$WebUrl/Lists/$ListName/AllItems.aspx" -ForegroundColor Gray
-    Write-Host "https://sp.safalo.com/hr/Lists/$ListName/AllItems.aspx" -ForegroundColor Gray
+    Write-Host "FAILED: All authentication methods failed" -ForegroundColor Red
+    Write-Host "`nPossible solutions:" -ForegroundColor Yellow
+    Write-Host "1. Run PowerShell as SAFALO domain administrator" -ForegroundColor White
+    Write-Host "2. Check if you're on the SAFALO domain network" -ForegroundColor White
+    Write-Host "3. Verify the URL is correct by testing in browser first" -ForegroundColor White
+    Write-Host "4. Contact IT about SharePoint authentication settings" -ForegroundColor White
 }
 
-Write-Host "`nTest completed!" -ForegroundColor Green
+Write-Host "`nAuthentication test completed!" -ForegroundColor Green
