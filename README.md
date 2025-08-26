@@ -31,3 +31,6 @@ https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/?cs=1873324
 
 cd C:\Users\administrator.SAFALO\Desktop\Script
 powershell -NoProfile -ExecutionPolicy Bypass -File .\ExportForms.ps1
+
+
+.\PayloadBasedExport.ps1 -WebUrl "https://sp.safalo.com/ConnorsWorkshop" -ListName "OnboardingList" -StartID 1 -EndID 10 -OutputPath "C:\Exports\NintexForms"
