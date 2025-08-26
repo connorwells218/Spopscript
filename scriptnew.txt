@@ -1,11 +1,15 @@
 <#
-Exports SharePoint 2016 Nintex Display Forms to PDF using Edge + Selenium + DevTools.
-- Auth: Windows prompt OK
-- Works when launched from ISE or console
-- Auto-downloads Selenium DLLs (or load from .\bin if offline)
+Export Nintex DispForm.aspx pages to PDF via Edge (Chromium) + Selenium 4 + DevTools.
 
+Run:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\ExportForms.ps1
+  # or customize:
+  .\ExportForms.ps1 -StartID 1 -EndID 50 -OutputPath 'C:\Exports\NintexForms' -ShowBrowser
 Prereqs:
-- msedgedriver.exe at: C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe
+  - Edge installed (v109 in your case)
+  - EdgeDriver matches Edge (msedgedriver.exe)
+  - Place msedgedriver.exe at C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe
+  - Script can download Selenium DLLs OR you provide them in .\bin (see -Offline)
 #>
 
 param(
@@ -14,7 +18,8 @@ param(
   [int]   $StartID    = 1,
   [int]   $EndID      = 10,
   [string]$OutputPath = "C:\Exports\NintexForms",
-  [switch]$Offline    # if set, don’t try to download Selenium DLLs; load from .\bin
+  [switch]$Offline,         # if set, don't download Selenium DLLs; expect them in .\bin
+  [switch]$ShowBrowser      # if set, runs with a visible Edge; otherwise headless
 )
 
 # ---------- utilities ----------
@@ -30,7 +35,7 @@ function Ensure-Folder([string]$p) {
   }
 }
 
-# ensure we can download from NuGet (older Windows defaults)
+# Older Windows may default to weaker TLS; force TLS 1.2 for NuGet
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 function Ensure-SeleniumAssemblies {
@@ -41,9 +46,7 @@ function Ensure-SeleniumAssemblies {
   $sup = Join-Path $bin "WebDriver.Support.dll"
 
   if (-not (Test-Path $wd -PathType Leaf) -or -not (Test-Path $sup -PathType Leaf)) {
-    if ($Offline) {
-      throw "Selenium DLLs not found in `"$bin`" and -Offline was specified. Place WebDriver.dll and WebDriver.Support.dll there."
-    }
+    if ($Offline) { throw "Selenium DLLs not found in `"$bin`" and -Offline was specified." }
 
     Write-Host "Downloading Selenium assemblies to $bin ..." -ForegroundColor Yellow
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -115,8 +118,11 @@ Write-Host "List : $ListName  IDs: $StartID..$EndID" -ForegroundColor Gray
 Ensure-Folder $OutputPath
 Ensure-SeleniumAssemblies
 
-# Path to EdgeDriver
+# Path to EdgeDriver (update if you move it)
 $driverPath = 'C:\Users\administrator.SAFALO\Desktop\Script\msedgedriver.exe'
+if (-not (Test-Path $driverPath -PathType Leaf)) {
+  throw "msedgedriver.exe not found at: $driverPath"
+}
 $driverDir  = Split-Path $driverPath -Parent
 $driverName = Split-Path $driverPath -Leaf
 
@@ -124,20 +130,27 @@ $driverName = Split-Path $driverPath -Leaf
 $edgeSvc = [OpenQA.Selenium.Edge.EdgeDriverService]::CreateDefaultService($driverDir, $driverName)
 $edgeSvc.HideCommandPromptWindow = $true
 
-# Edge options
-$opts = New-Object OpenQA.Selenium.Edge.EdgeOptions
-$opts.UseChromium = $true
+# Build Edge options (Selenium 4: no UseChromium property)
+# Create via the loaded assembly to avoid type-resolution issues on some servers
+$wdDll = Join-Path $ScriptRoot 'bin\WebDriver.dll'
+$asm   = [System.Reflection.Assembly]::LoadFrom($wdDll)
+
+$edgeOptionsType = $asm.GetType('OpenQA.Selenium.Edge.EdgeOptions')
+if (-not $edgeOptionsType) { throw "EdgeOptions type not found in WebDriver.dll." }
+$opts = [System.Activator]::CreateInstance($edgeOptionsType)
 
 $host = ([Uri]$WebUrl).Host
-$opts.AddArgument("--auth-server-allowlist=$host")
-$opts.AddArgument("--auth-negotiate-delegate-whitelist=$host")
-$opts.AddArgument("--disable-features=BlockInsecurePrivateNetworkRequests")
-$opts.AddArgument("--headless=new")     # remove this line if you prefer a visible window
-$opts.AddArgument("--disable-gpu")
+$null = $opts.AddArgument("--auth-server-allowlist=$host")
+$null = $opts.AddArgument("--auth-negotiate-delegate-whitelist=$host")
+$null = $opts.AddArgument("--disable-features=BlockInsecurePrivateNetworkRequests")
+if (-not $ShowBrowser) { $null = $opts.AddArgument("--headless=new"); $null = $opts.AddArgument("--disable-gpu") }
 
-# Launch Edge
-$driver = New-Object OpenQA.Selenium.Edge.EdgeDriver($edgeSvc, $opts)
-$driver.Manage().Timeouts().PageLoad = [TimeSpan]::FromSeconds(180)
+# Create EdgeDriver via assembly to guarantee constructor resolution
+$edgeDriverType = $asm.GetType('OpenQA.Selenium.Edge.EdgeDriver')
+if (-not $edgeDriverType) { throw "EdgeDriver type not found in WebDriver.dll." }
+
+$driver = [System.Activator]::CreateInstance($edgeDriverType, @($edgeSvc, $opts))
+$null = $driver.Manage().Timeouts().PageLoad = [TimeSpan]::FromSeconds(180)
 
 $ok = 0; $bad = 0
 
