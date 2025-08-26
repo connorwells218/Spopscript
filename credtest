@@ -1,0 +1,10 @@
+# Test your credentials
+$cred = Get-Credential -Message "Enter SharePoint credentials"
+$testUrl = "https://sp.safalo.com/hr"
+
+try {
+    $response = Invoke-WebRequest -Uri $testUrl -Credential $cred -UseBasicParsing
+    Write-Host "Credentials work!" -ForegroundColor Green
+} catch {
+    Write-Host "Credential error: $($_.Exception.Message)" -ForegroundColor Red
+}
