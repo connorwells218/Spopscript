@@ -1,0 +1,215 @@
+# Fixed Form Export - Gets actual form content, not SharePoint navigation
+param(
+    [string]$WebUrl = "https://sp.safalo.com/ConnorsWorkshop",
+    [string]$ListName = "OnboardingList", 
+    [string]$OutputPath = "C:\Exports\NintexForms",
+    [int]$TestID = 2  # Start with a single ID to test
+)
+
+Write-Host "Fixed Form Export - Testing URL Patterns" -ForegroundColor Green
+Write-Host "Web: $WebUrl"
+Write-Host "List: $ListName"
+Write-Host "Testing with ID: $TestID"
+
+# Create output directory
+if (!(Test-Path $OutputPath)) {
+    New-Item -ItemType Directory -Path $OutputPath -Force
+}
+
+# Multiple URL patterns to try - based on what we've seen in your screenshots
+$urlPatterns = @(
+    # Pattern 1: Standard SharePoint display form
+    "$WebUrl/Lists/$ListName/DispForm.aspx?ID={0}",
+    
+    # Pattern 2: Your actual working URL from screenshots  
+    "https://sp.safalo.com/hr/Lists/$ListName/DispForm.aspx?ID={0}",
+    
+    # Pattern 3: Nintex form specific URL
+    "$WebUrl/Lists/$ListName/Item/displayifs.aspx?ID={0}",
+    
+    # Pattern 4: Alternative Nintex pattern
+    "https://sp.safalo.com/hr/Lists/$ListName/Item/displayifs.aspx?ID={0}",
+    
+    # Pattern 5: Direct form view
+    "$WebUrl/_layouts/15/listform.aspx?PageType=4&ListId={{list-id}}&ID={0}",
+    
+    # Pattern 6: Alternative layout
+    "$WebUrl/Lists/$ListName/EditForm.aspx?ID={0}"
+)
+
+function Test-FormUrl {
+    param([string]$Url, [int]$PatternNum)
+    
+    Write-Host "`nTesting Pattern $PatternNum`: $Url" -ForegroundColor Yellow
+    
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseDefaultCredentials -UseBasicParsing -TimeoutSec 15
+        
+        # Check if we got actual form content vs SharePoint navigation
+        $content = $response.Content
+        
+        # Look for indicators of actual form content
+        $hasFormData = $false
+        $contentType = "Unknown"
+        
+        if ($content -match "Nintex.*Form" -or $content -match "displayifs" -or $content -match "form.*data") {
+            $hasFormData = $true
+            $contentType = "Nintex Form"
+        }
+        elseif ($content -match "SharePoint.*navigation" -or $content -match "Skip Ribbon Commands" -or $content -match "Site Contents") {
+            $contentType = "SharePoint Navigation (Not Form)"
+        }
+        elseif ($content -match "Title.*Email.*Department" -or $content -match "field.*value" -or $content.Length -gt 10000) {
+            $hasFormData = $true
+            $contentType = "Form Content"
+        }
+        
+        $contentSize = $content.Length
+        
+        if ($hasFormData) {
+            Write-Host "  SUCCESS - Got form content ($contentSize chars, $contentType)" -ForegroundColor Green
+            return @{ Success = $true; Content = $content; Url = $Url }
+        } else {
+            Write-Host "  PARTIAL - Got SharePoint page but not form ($contentSize chars, $contentType)" -ForegroundColor Yellow
+            return @{ Success = $false; Content = $content; Url = $Url; Reason = $contentType }
+        }
+    }
+    catch {
+        Write-Host "  FAILED - $($_.Exception.Message)" -ForegroundColor Red
+        return @{ Success = $false; Content = $null; Url = $Url; Reason = $_.Exception.Message }
+    }
+}
+
+function Save-FormContent {
+    param([string]$Content, [string]$OutputFile)
+    
+    # Create a better HTML structure for the form
+    $improvedHtml = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Nintex Form Export</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+        .form-container { max-width: 800px; margin: 0 auto; }
+        .form-header { background: #0072C6; color: white; padding: 15px; margin-bottom: 20px; }
+        .form-content { background: white; padding: 20px; }
+        /* Hide SharePoint navigation elements */
+        #s4-ribbonrow, #suiteBarTop, .ms-cui-ribbon, .ms-breadcrumb-top { display: none !important; }
+        .ms-webpart-chrome-title { display: none !important; }
+        @media print { 
+            body { margin: 0; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <div class="form-header">
+            <h2>Nintex Form - ID $TestID</h2>
+            <p>Exported: $(Get-Date)</p>
+        </div>
+        <div class="form-content">
+            $Content
+        </div>
+    </div>
+</body>
+</html>
+"@
+
+    try {
+        [System.IO.File]::WriteAllText($OutputFile, $improvedHtml, [System.Text.Encoding]::UTF8)
+        return $true
+    }
+    catch {
+        Write-Host "Failed to save HTML: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+# Test each URL pattern
+$workingPattern = $null
+$bestResult = $null
+
+Write-Host "`nTesting URL patterns for ID $TestID..." -ForegroundColor Cyan
+
+for ($i = 0; $i -lt $urlPatterns.Count; $i++) {
+    $testUrl = $urlPatterns[$i] -f $TestID
+    $result = Test-FormUrl -Url $testUrl -PatternNum ($i + 1)
+    
+    if ($result.Success) {
+        $workingPattern = $urlPatterns[$i]
+        $bestResult = $result
+        Write-Host "  FOUND WORKING PATTERN!" -ForegroundColor Green
+        break
+    }
+    elseif ($result.Content -and $result.Content.Length -gt 5000) {
+        # Keep track of the best non-form result as fallback
+        if (!$bestResult -or $result.Content.Length -gt $bestResult.Content.Length) {
+            $bestResult = $result
+        }
+    }
+}
+
+if (!$workingPattern -and $bestResult) {
+    Write-Host "`nNo perfect pattern found, using best available..." -ForegroundColor Yellow
+    $workingPattern = $bestResult.Url
+}
+
+if ($workingPattern) {
+    Write-Host "`nUsing pattern: $workingPattern" -ForegroundColor Green
+    
+    # Save test HTML
+    $testHtmlFile = "$OutputPath\TestForm_ID$TestID.html"
+    if (Save-FormContent -Content $bestResult.Content -OutputFile $testHtmlFile) {
+        Write-Host "Test HTML saved: $testHtmlFile" -ForegroundColor Green
+        
+        # Convert to PDF
+        $testPdfFile = "$OutputPath\TestForm_ID$TestID.pdf"
+        
+        # Try Chrome first
+        $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+        if (Test-Path $chrome) {
+            $fileUri = "file:///$($testHtmlFile.Replace('\', '/'))"
+            & $chrome --headless --disable-gpu --no-sandbox --print-to-pdf="$testPdfFile" "$fileUri" 2>$null
+            Start-Sleep -Seconds 4
+            
+            if (Test-Path $testPdfFile) {
+                $pdfSize = (Get-Item $testPdfFile).Length
+                Write-Host "PDF created successfully: $pdfSize bytes" -ForegroundColor Green
+                Write-Host "PDF location: $testPdfFile" -ForegroundColor Cyan
+            } else {
+                Write-Host "PDF creation failed" -ForegroundColor Red
+            }
+        }
+        
+        # Show results
+        Write-Host "`n=== TEST RESULTS ===" -ForegroundColor Cyan
+        Write-Host "Working URL pattern: $workingPattern" -ForegroundColor White
+        Write-Host "Test HTML: $testHtmlFile" -ForegroundColor White
+        Write-Host "Test PDF: $testPdfFile" -ForegroundColor White
+        
+        Write-Host "`nNext steps:" -ForegroundColor Yellow
+        Write-Host "1. Check the HTML and PDF files to verify they contain actual form data" -ForegroundColor White
+        Write-Host "2. If they look good, use this pattern for bulk export" -ForegroundColor White
+        Write-Host "3. If not, we may need to try different approaches" -ForegroundColor White
+        
+        # Provide bulk export command
+        Write-Host "`nFor bulk export, use:" -ForegroundColor Green
+        Write-Host ".\BulkExport.ps1 -UrlPattern '$workingPattern' -StartID 1 -EndID 100" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "`nNo working URL pattern found." -ForegroundColor Red
+    Write-Host "Possible issues:" -ForegroundColor Yellow
+    Write-Host "1. The list name '$ListName' might be incorrect" -ForegroundColor White
+    Write-Host "2. The web URL might be wrong" -ForegroundColor White  
+    Write-Host "3. The forms might use a different URL structure" -ForegroundColor White
+    Write-Host "4. Authentication issues" -ForegroundColor White
+    
+    Write-Host "`nTry these commands manually in your browser:" -ForegroundColor Cyan
+    Write-Host "$WebUrl/Lists/$ListName/AllItems.aspx" -ForegroundColor Gray
+    Write-Host "https://sp.safalo.com/hr/Lists/$ListName/AllItems.aspx" -ForegroundColor Gray
+}
+
+Write-Host "`nTest completed!" -ForegroundColor Green
